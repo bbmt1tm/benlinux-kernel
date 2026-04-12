@@ -38,118 +38,114 @@ jobs:
 
     - name: Apply BenLinux configuration
       run: |
-        REPO_ROOT="$(pwd)"
-
-        # Copy defconfig and kernel config fragment
         cp configs/benlinux_defconfig buildroot/configs/benlinux_defconfig
         mkdir -p buildroot/board/benlinux
         cp benlinux_kernel.cfg buildroot/board/benlinux/benlinux_kernel.cfg
-
         cd buildroot
         make benlinux_defconfig
-
-        # Set BR2_GLOBAL_PATCH_DIR to our patches directory (absolute path).
-        # Buildroot applies these patches during linux-extract/linux-patch.
-        # This handles the timex.h and irq-riscv-intc.c modifications.
-        echo "BR2_GLOBAL_PATCH_DIR=\"${REPO_ROOT}/patches\"" >> .config
-        make olddefconfig
-
         echo "=== Config summary ==="
-        grep "BR2_GLOBAL_PATCH_DIR\|BR2_LINUX_KERNEL_DEFCONFIG\|BR2_LINUX_KERNEL_CONFIG_FRAGMENT" .config
+        grep "BR2_LINUX_KERNEL_DEFCONFIG\|BR2_LINUX_KERNEL_CONFIG_FRAGMENT\|BR2_TOOLCHAIN_BUILDROOT" .config | head -10
 
-    - name: Build (first pass — downloads, extracts, patches, builds)
+    - name: Download and extract kernel
       run: |
         cd buildroot
-
-        # First pass: let Buildroot download + extract + apply our patches + build.
-        # Our patches from BR2_GLOBAL_PATCH_DIR/linux/ are applied automatically.
-        # The build will fail because the ESP32P4_TIMER driver doesn't exist yet.
-        # That's fine — we'll add it and rebuild.
-        #
-        # Actually, do it in steps so we can inject the timer driver:
-        # Step 1: Download and extract kernel (patches applied here)
         make linux-source
         make linux-extract
-        make linux-patch
 
-        # Step 2: Inject custom timer driver and build system entries
+    - name: Apply kernel modifications
+      run: |
+        cd buildroot
+        REPO_ROOT="$(cd .. && pwd)"
         LINUX_DIR=$(ls -d output/build/linux-*/ | head -1)
         echo "Linux source: $LINUX_DIR"
 
-        # Copy our custom timer driver
-        cp "${REPO_ROOT:-$(cd .. && pwd)}/timer-esp32p4.c" "${LINUX_DIR}/drivers/clocksource/"
-        echo "Copied timer-esp32p4.c to ${LINUX_DIR}/drivers/clocksource/"
+        # ==================================================
+        # PATCH 1: timex.h — CSR time instead of CLINT MMIO
+        # ==================================================
+        TIMEX="${LINUX_DIR}/arch/riscv/include/asm/timex.h"
+        echo "=== Patching timex.h ==="
 
-        # Add Kconfig entry for ESP32P4_TIMER
-        if ! grep -q "ESP32P4_TIMER" "${LINUX_DIR}/drivers/clocksource/Kconfig"; then
-          echo ''                                                              >> "${LINUX_DIR}/drivers/clocksource/Kconfig"
-          echo 'config ESP32P4_TIMER'                                          >> "${LINUX_DIR}/drivers/clocksource/Kconfig"
-          printf '\tbool "ESP32-P4 BenVisor timer driver"\n'                   >> "${LINUX_DIR}/drivers/clocksource/Kconfig"
-          printf '\tdepends on RISCV && RISCV_M_MODE\n'                        >> "${LINUX_DIR}/drivers/clocksource/Kconfig"
-          printf '\thelp\n'                                                    >> "${LINUX_DIR}/drivers/clocksource/Kconfig"
-          printf '\t  Timer driver for ESP32-P4 running under BenVisor.\n'     >> "${LINUX_DIR}/drivers/clocksource/Kconfig"
-          printf '\t  Select this instead of CLINT_TIMER for ESP32-P4.\n'      >> "${LINUX_DIR}/drivers/clocksource/Kconfig"
-          echo "Added ESP32P4_TIMER to Kconfig"
-        fi
+        sed -i '/extern u64 __iomem \*clint_time_val;/d' "$TIMEX"
+        sed -i 's|return readl_relaxed(((u32 \*)clint_time_val));|return csr_read(CSR_TIME);|' "$TIMEX"
+        sed -i 's|return readl_relaxed(((u32 \*)clint_time_val) + 1);|return csr_read(CSR_TIMEH);|' "$TIMEX"
+        sed -i 's|hi = get_cycles_hi();|hi = csr_read(CSR_TIMEH);|' "$TIMEX"
+        sed -i 's|lo = get_cycles();|lo = csr_read(CSR_TIME);|' "$TIMEX"
+        sed -i 's|} while (hi != get_cycles_hi());|} while (hi != csr_read(CSR_TIMEH));|' "$TIMEX"
 
-        # Add Makefile entry
-        if ! grep -q "timer-esp32p4" "${LINUX_DIR}/drivers/clocksource/Makefile"; then
-          echo 'obj-$(CONFIG_ESP32P4_TIMER)	+= timer-esp32p4.o' >> "${LINUX_DIR}/drivers/clocksource/Makefile"
-          echo "Added timer-esp32p4 to Makefile"
-        fi
-
-        # Verify patches were applied
-        echo ""
-        echo "=== Verifying patches ==="
-        if grep -q "csr_read(CSR_TIME)" "${LINUX_DIR}/arch/riscv/include/asm/timex.h"; then
-          echo "OK: timex.h patched (CSR time)"
+        if grep -q "csr_read(CSR_TIME)" "$TIMEX"; then
+          echo "OK: timex.h patched"
         else
-          echo "WARN: timex.h patch may not have applied!"
-          grep "get_cycles" "${LINUX_DIR}/arch/riscv/include/asm/timex.h" | head -5
-        fi
-
-        if grep -q "0xFFF" "${LINUX_DIR}/drivers/irqchip/irq-riscv-intc.c"; then
-          echo "OK: irq-riscv-intc.c patched (CLIC mcause mask)"
-        else
-          echo "WARN: irq-riscv-intc.c patch may not have applied!"
-          grep "cause.*CAUSE_IRQ" "${LINUX_DIR}/drivers/irqchip/irq-riscv-intc.c" | head -3
-        fi
-
-        if [ -f "${LINUX_DIR}/drivers/clocksource/timer-esp32p4.c" ]; then
-          echo "OK: timer-esp32p4.c present"
-        else
-          echo "FATAL: timer-esp32p4.c missing!"
+          echo "FATAL: timex.h patch failed!"
+          sed -n '/CONFIG_RISCV_M_MODE/,/^#else/p' "$TIMEX"
           exit 1
         fi
 
-    - name: Configure and build kernel
+        # ==================================================
+        # PATCH 2: irq-riscv-intc.c — CLIC mcause 12-bit mask
+        # ==================================================
+        INTC="${LINUX_DIR}/drivers/irqchip/irq-riscv-intc.c"
+        echo "=== Patching irq-riscv-intc.c ==="
+
+        sed -i 's|regs->cause & ~CAUSE_IRQ_FLAG|regs->cause \& 0xFFF|' "$INTC"
+
+        if grep -q "0xFFF" "$INTC"; then
+          echo "OK: irq-riscv-intc.c patched"
+        else
+          echo "FATAL: irq-riscv-intc.c patch failed!"
+          grep -n "cause" "$INTC" | head -10
+          exit 1
+        fi
+
+        # ==================================================
+        # ADD: timer-esp32p4.c + Kconfig + Makefile
+        # ==================================================
+        echo "=== Adding timer driver ==="
+
+        cp "${REPO_ROOT}/timer-esp32p4.c" "${LINUX_DIR}/drivers/clocksource/"
+        echo "OK: timer-esp32p4.c copied"
+
+        KCONFIG="${LINUX_DIR}/drivers/clocksource/Kconfig"
+        if ! grep -q "ESP32P4_TIMER" "$KCONFIG"; then
+          echo ''                                                              >> "$KCONFIG"
+          echo 'config ESP32P4_TIMER'                                          >> "$KCONFIG"
+          printf '\tbool "ESP32-P4 BenVisor timer driver"\n'                   >> "$KCONFIG"
+          printf '\tdepends on RISCV && RISCV_M_MODE\n'                        >> "$KCONFIG"
+          printf '\thelp\n'                                                    >> "$KCONFIG"
+          printf '\t  Timer driver for ESP32-P4 running under BenVisor.\n'     >> "$KCONFIG"
+          printf '\t  Select this instead of CLINT_TIMER for ESP32-P4.\n'      >> "$KCONFIG"
+          echo "OK: Kconfig entry added"
+        fi
+
+        MAKEFILE="${LINUX_DIR}/drivers/clocksource/Makefile"
+        if ! grep -q "timer-esp32p4" "$MAKEFILE"; then
+          echo 'obj-$(CONFIG_ESP32P4_TIMER)	+= timer-esp32p4.o' >> "$MAKEFILE"
+          echo "OK: Makefile entry added"
+        fi
+
+        echo "=== All kernel modifications applied ==="
+
+    - name: Build kernel and rootfs
       run: |
         cd buildroot
-
-        # Now build everything — kernel + rootfs + Image
         make -j$(nproc)
 
-        # LZ4 initramfs fix (same workaround as BenVM build)
+        # LZ4 initramfs fix
         LINUX_DIR=$(ls -d output/build/linux-*/ | head -1)
         KCONFIG="${LINUX_DIR}/.config"
         if ! grep -q "CONFIG_INITRAMFS_COMPRESSION_LZ4=y" "$KCONFIG"; then
           echo "=== Fixing initramfs compression: forcing LZ4 ==="
           PRE_SIZE=$(stat -c%s output/images/Image 2>/dev/null || echo 0)
-
           sed -i 's/^CONFIG_INITRAMFS_COMPRESSION_.*=y/# &/' "$KCONFIG"
           sed -i '/CONFIG_INITRAMFS_COMPRESSION_LZ4/d' "$KCONFIG"
           echo "CONFIG_INITRAMFS_COMPRESSION_LZ4=y" >> "$KCONFIG"
-
           rm -f "${LINUX_DIR}/usr/initramfs_inc_data"
           rm -f "${LINUX_DIR}/usr/initramfs_data.o"
           rm -f "${LINUX_DIR}/usr/built-in.a"
           rm -f "${LINUX_DIR}/usr/.initramfs_inc_data.cmd"
-
           make -C "${LINUX_DIR}" ARCH=riscv olddefconfig
           make linux-rebuild -j$(nproc)
-
           POST_SIZE=$(stat -c%s output/images/Image 2>/dev/null || echo 0)
-          echo "Image: ${PRE_SIZE} → ${POST_SIZE} bytes"
+          echo "Image: ${PRE_SIZE} -> ${POST_SIZE} bytes"
         else
           echo "=== LZ4 already active ==="
         fi
@@ -164,106 +160,54 @@ jobs:
         KVER=$(basename "$LINUX_DIR" | sed 's/linux-//')
         echo "Kernel version: $KVER"
 
-        # NOMMU checks
         if grep -q "# CONFIG_MMU is not set" "$CONFIG"; then
           echo "OK: NOMMU mode"
         else
-          echo "FATAL: CONFIG_MMU should NOT be set for NOMMU build"
-          FAIL=1
+          echo "FATAL: MMU should not be set"; FAIL=1
         fi
 
         if grep -q "CONFIG_RISCV_M_MODE=y" "$CONFIG"; then
-          echo "OK: M-mode execution"
+          echo "OK: M-mode"
         else
-          echo "FATAL: CONFIG_RISCV_M_MODE not set"
-          FAIL=1
+          echo "FATAL: M-mode not set"; FAIL=1
         fi
 
-        # SBI must NOT be enabled (incompatible with M-mode)
         if grep -q "CONFIG_RISCV_SBI=y" "$CONFIG"; then
-          echo "FATAL: CONFIG_RISCV_SBI=y — impossible with M-mode!"
-          FAIL=1
+          echo "FATAL: SBI enabled (impossible with M-mode)"; FAIL=1
         else
-          echo "OK: SBI disabled (correct for M-mode)"
+          echo "OK: SBI disabled"
         fi
 
-        # Our custom timer
         if grep -q "CONFIG_ESP32P4_TIMER=y" "$CONFIG"; then
           echo "OK: ESP32P4_TIMER enabled"
         else
-          echo "WARN: ESP32P4_TIMER not set — check Kconfig"
+          echo "WARN: ESP32P4_TIMER not set"
         fi
 
-        # CLINT timer should be disabled
-        if grep -q "CONFIG_CLINT_TIMER=y" "$CONFIG"; then
-          echo "WARN: CLINT_TIMER still enabled (should be disabled for P4)"
-        else
-          echo "OK: CLINT_TIMER disabled"
-        fi
-
-        # No compressed instructions
         if grep -q "CONFIG_RISCV_ISA_C=y" "$CONFIG"; then
-          echo "FATAL: Compressed instructions enabled!"
-          FAIL=1
+          echo "FATAL: Compressed instructions enabled"; FAIL=1
         else
           echo "OK: No compressed instructions"
         fi
 
-        # PAGE_OFFSET check
-        if grep -q "CONFIG_PAGE_OFFSET=0x48000000" "$CONFIG"; then
-          echo "OK: PAGE_OFFSET=0x48000000 (matches PSRAM)"
-        else
-          OFFSET=$(grep "CONFIG_PAGE_OFFSET" "$CONFIG" || echo "not found")
-          echo "WARN: PAGE_OFFSET: $OFFSET (expected 0x48000000)"
-        fi
-
-        # LZ4
-        if grep -q "CONFIG_RD_LZ4=y" "$CONFIG"; then
-          echo "OK: LZ4 decompression"
-        fi
-        if grep -q "CONFIG_INITRAMFS_COMPRESSION_LZ4=y" "$CONFIG"; then
-          echo "OK: LZ4 initramfs embedding"
-        fi
-
-        # Size checks
-        for OPT in CONFIG_PCI CONFIG_VIRTUALIZATION CONFIG_THERMAL CONFIG_NET; do
-          if grep -q "${OPT}=y" "$CONFIG"; then
-            echo "WARN: ${OPT}=y (unnecessary, bloats Image)"
-          else
-            echo "OK: ${OPT} disabled"
-          fi
-        done
+        grep "CONFIG_PAGE_OFFSET" "$CONFIG" || echo "PAGE_OFFSET: not found"
 
         if [ $FAIL -ne 0 ]; then
-          echo ""
-          echo "BUILD VERIFICATION FAILED"
-          exit 1
+          echo "BUILD VERIFICATION FAILED"; exit 1
         fi
 
-    - name: Verify Image format
+    - name: Verify Image
       run: |
         IMAGE="buildroot/output/images/Image"
-        echo "=== Image file info ==="
         ls -la "$IMAGE"
-        SIZE=$(stat -c%s "$IMAGE")
-        echo "Size: ${SIZE} bytes ($((SIZE / 1024)) KB)"
-
-        # Check first instruction
         python3 -c "
         data = open('$IMAGE', 'rb').read()
-        first_word = int.from_bytes(data[0:4], 'little')
-        print(f'First 4 bytes: 0x{first_word:08x}')
-        if first_word & 0x3 == 0x3:
-            print('  → 32-bit instruction — good, no C extension')
-        else:
-            print('  → WARNING: compressed instruction at offset 0!')
-        zeros = data.count(b'\x00')
-        print(f'Content: {len(data)-zeros:,} non-zero bytes ({100*(len(data)-zeros)/len(data):.0f}%)')
+        w = int.from_bytes(data[0:4], 'little')
+        print(f'First word: 0x{w:08x}')
+        print('32-bit insn' if w & 0x3 == 0x3 else 'WARNING: compressed')
+        z = data.count(b'\x00')
+        print(f'{len(data)-z:,} non-zero bytes of {len(data):,} total')
         "
-
-    - name: Compress and upload
-      run: |
-        gzip -k buildroot/output/images/Image
 
     - name: Upload kernel Image
       uses: actions/upload-artifact@v4
