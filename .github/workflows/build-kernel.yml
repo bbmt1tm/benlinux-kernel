@@ -93,13 +93,13 @@ jobs:
         fi
 
         # ==================================================
-        # PATCH 3: Kconfig — PAGE_OFFSET for PSRAM at 0x48100000
+        # PATCH 3: Kconfig — PAGE_OFFSET for PSRAM at 0x48200000
         # ==================================================
         KCONFIG_RISCV="${LINUX_DIR}/arch/riscv/Kconfig"
         echo "=== Patching PAGE_OFFSET ==="
-        sed -i 's|default 0x80000000 if !MMU && RISCV_M_MODE|default 0x48100000 if !MMU \&\& RISCV_M_MODE|' "$KCONFIG_RISCV"
-        if grep -q "0x48100000 if !MMU" "$KCONFIG_RISCV"; then
-          echo "OK: PAGE_OFFSET patched to 0x48100000"
+        sed -i 's|default 0x80000000 if !MMU && RISCV_M_MODE|default 0x48200000 if !MMU \&\& RISCV_M_MODE|' "$KCONFIG_RISCV"
+        if grep -q "0x48200000 if !MMU" "$KCONFIG_RISCV"; then
+          echo "OK: PAGE_OFFSET patched to 0x48200000"
         else
           echo "FATAL: PAGE_OFFSET patch failed!"
           grep -A5 "config PAGE_OFFSET" "$KCONFIG_RISCV"
@@ -216,8 +216,8 @@ jobs:
           echo "OK: No compressed instructions"
         fi
 
-        if grep -q 'CONFIG_PAGE_OFFSET=0x48100000' "$CONFIG"; then
-          echo "OK: PAGE_OFFSET=0x48100000"
+        if grep -q 'CONFIG_PAGE_OFFSET=0x48200000' "$CONFIG"; then
+          echo "OK: PAGE_OFFSET=0x48200000"
         else
           echo "FATAL: PAGE_OFFSET wrong"; grep PAGE_OFFSET "$CONFIG"; FAIL=1
         fi
