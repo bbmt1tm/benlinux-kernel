@@ -22,6 +22,7 @@
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/serial_core.h>
 
 /* Ring buffer parameters — must match benvisor.h */
@@ -106,25 +107,23 @@ static struct console benvisor_console = {
 static int __init benvisor_console_init(void)
 {
 	struct device_node *np;
-	struct resource res;
+	u32 reg[2];
 
 	np = of_find_compatible_node(NULL, NULL, "benos,benvisor-console");
 	if (!np)
 		return -ENODEV;
 
-	if (of_address_to_resource(np, 0, &res)) {
+	if (of_property_read_u32_array(np, "reg", reg, 2)) {
 		of_node_put(np);
 		return -EINVAL;
 	}
 	of_node_put(np);
 
-	benvisor_console_base = ioremap(res.start, resource_size(&res));
-	if (!benvisor_console_base)
-		return -ENOMEM;
+	/* NOMMU: physical == virtual, no ioremap needed */
+	benvisor_console_base = (void __iomem *)(uintptr_t)reg[0];
 
 	register_console(&benvisor_console);
-	pr_info("benvisor-console: registered at 0x%08x\n",
-		(unsigned int)res.start);
+	pr_info("benvisor-console: registered at 0x%08x\n", reg[0]);
 	return 0;
 }
 console_initcall(benvisor_console_init);
