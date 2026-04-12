@@ -81,20 +81,14 @@ jobs:
         echo "Copied timer-esp32p4.c to ${LINUX_DIR}/drivers/clocksource/"
 
         # Add Kconfig entry for ESP32P4_TIMER
-        # Insert before the last 'endif' in drivers/clocksource/Kconfig
         if ! grep -q "ESP32P4_TIMER" "${LINUX_DIR}/drivers/clocksource/Kconfig"; then
-          cat >> "${LINUX_DIR}/drivers/clocksource/Kconfig" << 'KCONFIG_EOF'
-
-config ESP32P4_TIMER
-	bool "ESP32-P4 BenVisor timer driver"
-	depends on RISCV && RISCV_M_MODE
-	help
-	  Timer driver for ESP32-P4 running under BenVisor.
-	  Uses CSR time for clocksource (360 MHz) and shared SRAM for
-	  mtimecmp. BenVisor polls mtimecmp and injects CLIC machine
-	  timer interrupt (cause 7) when the deadline passes.
-	  Select this instead of CLINT_TIMER for ESP32-P4.
-KCONFIG_EOF
+          echo ''                                                              >> "${LINUX_DIR}/drivers/clocksource/Kconfig"
+          echo 'config ESP32P4_TIMER'                                          >> "${LINUX_DIR}/drivers/clocksource/Kconfig"
+          printf '\tbool "ESP32-P4 BenVisor timer driver"\n'                   >> "${LINUX_DIR}/drivers/clocksource/Kconfig"
+          printf '\tdepends on RISCV && RISCV_M_MODE\n'                        >> "${LINUX_DIR}/drivers/clocksource/Kconfig"
+          printf '\thelp\n'                                                    >> "${LINUX_DIR}/drivers/clocksource/Kconfig"
+          printf '\t  Timer driver for ESP32-P4 running under BenVisor.\n'     >> "${LINUX_DIR}/drivers/clocksource/Kconfig"
+          printf '\t  Select this instead of CLINT_TIMER for ESP32-P4.\n'      >> "${LINUX_DIR}/drivers/clocksource/Kconfig"
           echo "Added ESP32P4_TIMER to Kconfig"
         fi
 
