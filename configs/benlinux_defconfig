@@ -1,0 +1,61 @@
+# ============================================================
+# BenLinux NOMMU Buildroot Configuration
+# ============================================================
+# Builds a NOMMU Linux kernel + BusyBox rootfs for ESP32-P4.
+# Output: Image file with embedded initramfs for SD card.
+# ============================================================
+
+# === Architecture ===
+# RV32IMA — NO compressed (C) instructions.
+# Must disable RVC in Buildroot so toolchain uses -march=rv32ima.
+BR2_riscv=y
+BR2_RISCV_32=y
+BR2_RISCV_ISA_RVM=y
+BR2_RISCV_ISA_RVA=y
+# BR2_RISCV_ISA_RVC is not set
+BR2_RISCV_ABI_ILP32=y
+
+# === Toolchain ===
+# uclibc-ng for NOMMU/FLAT binary support
+BR2_TOOLCHAIN=y
+BR2_TOOLCHAIN_BUILDROOT=y
+BR2_TOOLCHAIN_BUILDROOT_UCLIBC=y
+BR2_KERNEL_HEADERS_6_12=y
+
+# === System ===
+BR2_TARGET_GENERIC_HOSTNAME="benlinux"
+BR2_TARGET_GENERIC_ISSUE="Welcome to BenLinux (ESP32-P4 native)"
+# Console: will be custom benvisor-console or UART
+BR2_TARGET_GENERIC_GETTY_PORT="console"
+BR2_TARGET_GENERIC_GETTY_BAUDRATE_0=y
+BR2_SYSTEM_DHCP=""
+BR2_TARGET_GENERIC_ROOT_PASSWD=""
+
+# === Init + Packages ===
+BR2_INIT_BUSYBOX=y
+BR2_PACKAGE_BUSYBOX=y
+
+# === FLAT binary format (NOMMU) ===
+BR2_BINFMT_FLAT=y
+
+# === Kernel ===
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.12.71"
+# Use rv32_nommu defconfig as base, then apply our fragment
+BR2_LINUX_KERNEL_USE_DEFCONFIG=y
+BR2_LINUX_KERNEL_DEFCONFIG="rv32_nommu"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="board/benlinux/benlinux_kernel.cfg"
+BR2_LINUX_KERNEL_IMAGE_TARGET_CUSTOM=y
+BR2_LINUX_KERNEL_IMAGE_TARGET_NAME="Image"
+
+# === LZ4 support ===
+BR2_LINUX_KERNEL_LZ4=y
+
+# === Root Filesystem ===
+BR2_TARGET_ROOTFS_CPIO=y
+BR2_TARGET_ROOTFS_CPIO_LZ4=y
+BR2_TARGET_ROOTFS_INITRAMFS=y
+# BR2_TARGET_ROOTFS_CPIO_NONE is not set
+# BR2_TARGET_ROOTFS_EXT2 is not set
+# BR2_TARGET_ROOTFS_TAR is not set

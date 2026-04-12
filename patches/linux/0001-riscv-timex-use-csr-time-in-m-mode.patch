@@ -1,0 +1,55 @@
+From: BenOS <ben@benos.dev>
+Subject: [PATCH 1/3] riscv: timex: use CSR time in M-mode instead of CLINT MMIO
+
+ESP32-P4 has no CLINT hardware. The clint_time_val pointer is never
+set, causing NULL dereference on first get_cycles() call.
+
+Read CSR time/timeh directly instead. On standard RISC-V, CSR time
+returns the same value as CLINT mtime (spec requirement), so this
+change is safe for all M-mode platforms.
+
+---
+ arch/riscv/include/asm/timex.h | 18 ++++++++++--------
+ 1 file changed, 10 insertions(+), 8 deletions(-)
+
+--- a/arch/riscv/include/asm/timex.h
++++ b/arch/riscv/include/asm/timex.h
+@@ -11,28 +11,30 @@
+ 
+ typedef unsigned long cycles_t;
+ 
+ #ifdef CONFIG_RISCV_M_MODE
+ 
+-extern u64 __iomem *clint_time_val;
++/*
++ * Read time directly from CSR (not CLINT MMIO).
++ * ESP32-P4 has no CLINT. CSR time ticks at CPU clock (360 MHz).
++ * On standard RISC-V, CSR time == CLINT mtime (spec guarantee).
++ */
+ 
+ static inline u32 get_cycles(void)
+ {
+-	return readl_relaxed(((u32 *)clint_time_val));
++	return csr_read(CSR_TIME);
+ }
+ 
+ static inline u32 get_cycles_hi(void)
+ {
+-	return readl_relaxed(((u32 *)clint_time_val) + 1);
++	return csr_read(CSR_TIMEH);
+ }
+ 
+ static inline u64 get_cycles64(void)
+ {
+ 	u32 hi, lo;
+ 
+ 	do {
+-		hi = get_cycles_hi();
+-		lo = get_cycles();
+-	} while (hi != get_cycles_hi());
++		hi = csr_read(CSR_TIMEH);
++		lo = csr_read(CSR_TIME);
++	} while (hi != csr_read(CSR_TIMEH));
+ 
+ 	return ((u64)hi << 32) | lo;
+ }

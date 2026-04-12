@@ -1,0 +1,26 @@
+From: BenOS <ben@benos.dev>
+Subject: [PATCH 2/3] irqchip: riscv-intc: use 12-bit mask for CLIC mcause
+
+ESP32-P4's CLIC produces mcause with mpp/mpie/mpil in bits 30:16
+(e.g., 0xB8000007 for timer interrupt). The existing mask
+(~CAUSE_IRQ_FLAG = 0x7FFFFFFF) only clears bit 31, leaving the
+CLIC status bits in the cause number. Linux then sees interrupt
+0x38000007 instead of 7.
+
+Mask to 12-bit exccode field instead. On non-CLIC hardware, bits
+30:12 are always zero, so this change is backwards-compatible.
+
+---
+ drivers/irqchip/irq-riscv-intc.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/drivers/irqchip/irq-riscv-intc.c
++++ b/drivers/irqchip/irq-riscv-intc.c
+@@ -28,7 +28,7 @@
+ static asmlinkage void riscv_intc_irq(struct pt_regs *regs)
+ {
+-	unsigned long cause = regs->cause & ~CAUSE_IRQ_FLAG;
++	unsigned long cause = regs->cause & 0xFFF; /* 12-bit exccode (CLIC-safe) */
+ 
+ 	if (unlikely(cause >= RISCV_INTC_NR_IRQS))
+ 		pr_err("unexpected interrupt cause %#lx", regs->cause);
