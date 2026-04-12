@@ -216,7 +216,11 @@ jobs:
           echo "OK: No compressed instructions"
         fi
 
-        grep "CONFIG_PAGE_OFFSET" "$CONFIG" || echo "PAGE_OFFSET: not found"
+        if grep -q 'CONFIG_PAGE_OFFSET=0x48000000' "$CONFIG"; then
+          echo "OK: PAGE_OFFSET=0x48000000"
+        else
+          echo "FATAL: PAGE_OFFSET wrong"; grep PAGE_OFFSET "$CONFIG"; FAIL=1
+        fi
 
         if [ $FAIL -ne 0 ]; then
           echo "BUILD VERIFICATION FAILED"; exit 1
@@ -234,6 +238,10 @@ jobs:
         z = data.count(b'\x00')
         print(f'{len(data)-z:,} non-zero bytes of {len(data):,} total')
         "
+
+    - name: Compress Image
+      run: |
+        gzip -k buildroot/output/images/Image
 
     - name: Upload kernel Image
       uses: actions/upload-artifact@v4
