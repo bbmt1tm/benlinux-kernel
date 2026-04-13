@@ -153,51 +153,59 @@ jobs:
         # ==================================================
         # PATCH 5: Boot breadcrumbs — ROM UART at key points
         # ==================================================
-        # ROM putc address 0x4FC00054 (esp_rom_output_tx_one_char on ESP32-P4)
-        # These direct calls work with MIE=0 and before earlycon setup.
         echo "=== Adding boot breadcrumbs ==="
-
-        # head.S: output 'H' right before tail start_kernel (proves head.S completed)
         HEAD_S="${LINUX_DIR}/arch/riscv/kernel/head.S"
-        # Find the line "tail start_kernel" after setup_trap_vector and insert breadcrumb before it
-        python3 -c "
-import re
-with open('${HEAD_S}', 'r') as f:
-    content = f.read()
-# Insert breadcrumb before the FIRST 'tail start_kernel' 
-# (which is the boot hart path, after .Lsetup_trap_vector)
-breadcrumb = '''\\t/* BenLinux breadcrumb: head.S complete */
-\\tli a0, 0x48\\t/* 'H' */
-\\tli t0, 0x4FC00054
-\\tjalr ra, t0, 0
-'''
-content = content.replace('\\ttail start_kernel', breadcrumb + '\\ttail start_kernel', 1)
-with open('${HEAD_S}', 'w') as f:
-    f.write(content)
-print('OK: head.S breadcrumb added')
-"
-
-        # init/main.c: output 'K' at very start of start_kernel (proves C entry)
         MAIN_C="${LINUX_DIR}/init/main.c"
-        python3 -c "
-with open('${MAIN_C}', 'r') as f:
-    content = f.read()
-# Insert after the opening brace of start_kernel, before char *command_line
-breadcrumb = '\\t/* BenLinux breadcrumb: start_kernel reached */\\n\\t((int(*)(unsigned char))0x4FC00054)(0x4B); /* K */\\n'
-content = content.replace('\\tchar *command_line;', breadcrumb + '\\tchar *command_line;', 1)
 
-# Also add breadcrumb after local_irq_disable to prove we got past it
-breadcrumb2 = '\\t((int(*)(unsigned char))0x4FC00054)(0x49); /* I = past irq_disable */\\n'
-content = content.replace('\\tlocal_irq_disable();\\n', '\\tlocal_irq_disable();\\n' + breadcrumb2, 1)
+        cat > /tmp/add_breadcrumbs.py << 'BREADCRUMB_EOF'
+        import sys
+        head_s = sys.argv[1]
+        main_c = sys.argv[2]
 
-# And one right before local_irq_enable near end of start_kernel
-breadcrumb3 = '\\t((int(*)(unsigned char))0x4FC00054)(0x45); /* E = about to enable IRQ */\\n'
-content = content.replace('\\tlocal_irq_enable();', breadcrumb3 + '\\tlocal_irq_enable();', 1)
+        # head.S: insert 'H' breadcrumb before first "tail start_kernel"
+        with open(head_s, 'r') as f:
+            lines = f.readlines()
+        out = []
+        patched = False
+        for line in lines:
+            if not patched and line.strip() == 'tail start_kernel':
+                indent = line[:len(line) - len(line.lstrip())]
+                out.append(indent + '/* BenLinux breadcrumb: head.S complete */\n')
+                out.append(indent + 'li a0, 0x48\n')
+                out.append(indent + 'li t0, 0x4FC00054\n')
+                out.append(indent + 'jalr ra, t0, 0\n')
+                patched = True
+            out.append(line)
+        with open(head_s, 'w') as f:
+            f.writelines(out)
+        print('OK: head.S breadcrumb (H) added' if patched else 'WARN: tail start_kernel not found')
 
-with open('${MAIN_C}', 'w') as f:
-    f.write(content)
-print('OK: init/main.c breadcrumbs added')
-"
+        # init/main.c: insert K, I, E breadcrumbs
+        with open(main_c, 'r') as f:
+            content = f.read()
+        rom_call = '((int(*)(unsigned char))0x4FC00054)'
+        k_done = i_done = e_done = False
+        if '\tchar *command_line;' in content:
+            content = content.replace(
+                '\tchar *command_line;',
+                '\t' + rom_call + '(0x4B); /* K = start_kernel */\n\tchar *command_line;', 1)
+            k_done = True
+        if '\tlocal_irq_disable();\n' in content:
+            content = content.replace(
+                '\tlocal_irq_disable();\n',
+                '\tlocal_irq_disable();\n\t' + rom_call + '(0x49); /* I = past irq_disable */\n', 1)
+            i_done = True
+        if '\tlocal_irq_enable();' in content:
+            content = content.replace(
+                '\tlocal_irq_enable();',
+                '\t' + rom_call + '(0x45); /* E = about to enable IRQ */\n\tlocal_irq_enable();', 1)
+            e_done = True
+        with open(main_c, 'w') as f:
+            f.write(content)
+        print(f'OK: init/main.c breadcrumbs: K={k_done} I={i_done} E={e_done}')
+        BREADCRUMB_EOF
+
+        python3 /tmp/add_breadcrumbs.py "$HEAD_S" "$MAIN_C"
 
         echo "=== All kernel modifications applied ==="
 
