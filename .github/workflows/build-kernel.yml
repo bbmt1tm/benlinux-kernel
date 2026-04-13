@@ -159,94 +159,81 @@ jobs:
 
         cat > /tmp/add_breadcrumbs.py << 'BREADCRUMB_EOF'
         import sys
+        ROM_PUTC = '0x4FC00054'
+        def asm_breadcrumb(char_hex, indent='\t', save_a0=False):
+            lines = [f'{indent}/* BenLinux breadcrumb: {char_hex} */\n']
+            if save_a0:
+                lines.append(f'{indent}csrw 0x340, a0\n')
+            lines.append(f'{indent}li a0, {char_hex}\n')
+            lines.append(f'{indent}li t0, {ROM_PUTC}\n')
+            lines.append(f'{indent}jalr ra, t0, 0\n')
+            if save_a0:
+                lines.append(f'{indent}csrr a0, 0x340\n')
+            return ''.join(lines)
         head_s = sys.argv[1]
         main_c = sys.argv[2]
-
-        # ROM putc call template (saves/restores a0 and ra)
-        def make_crumb(char_hex, label):
-            return [
-                f'\t/* BenLinux breadcrumb: {label} */\n',
-                f'\tmv t1, a0\n',
-                f'\tmv t2, ra\n',
-                f'\tli a0, {char_hex}\n',
-                f'\tli t0, 0x4FC00054\n',
-                f'\tjalr ra, t0, 0\n',
-                f'\tmv a0, t1\n',
-                f'\tmv ra, t2\n',
-            ]
-
-        # head.S: insert breadcrumbs at multiple stages
         with open(head_s, 'r') as f:
             lines = f.readlines()
-
         out = []
-        crumbs_added = []
-
+        did = {k: False for k in ['0','1','2','3','4','5','7','8','9','H']}
         for i, line in enumerate(lines):
+            s = line.strip()
+            indent = line[:len(line) - len(line.lstrip())] or '\t'
+            if not did['0'] and s == 'csrw CSR_IE, zero':
+                out.append(asm_breadcrumb('0x30', indent))
+                did['0'] = True
             out.append(line)
-            stripped = line.strip()
-
-            # '1' after fence.i (early in boot, proves first instructions ran)
-            if stripped == 'fence.i' and '1' not in crumbs_added:
-                out.extend(make_crumb('0x31', 'post fence.i'))
-                crumbs_added.append('1')
-
-            # '2' after .Lpmp_done: label (PMP writes complete)
-            if stripped == '.Lpmp_done:' and '2' not in crumbs_added:
-                out.extend(make_crumb('0x32', 'post PMP'))
-                crumbs_added.append('2')
-
-            # '3' after __bss_stop reference in BSS clear (look for bltu back to .Lclear_bss)
-            if '.Lclear_bss' in stripped and 'bltu' in stripped and '3' not in crumbs_added:
-                out.extend(make_crumb('0x33', 'post BSS clear'))
-                crumbs_added.append('3')
-
-            # '4' after init_thread_union stack setup
-            if 'init_thread_union' in stripped and '4' not in crumbs_added:
-                out.extend(make_crumb('0x34', 'post stack setup'))
-                crumbs_added.append('4')
-
-            # '5' after call setup_vm
-            if stripped == 'call setup_vm' and '5' not in crumbs_added:
-                out.extend(make_crumb('0x35', 'post setup_vm'))
-                crumbs_added.append('5')
-
-            # '6' after call soc_early_init
-            if stripped == 'call soc_early_init' and '6' not in crumbs_added:
-                out.extend(make_crumb('0x36', 'post soc_early_init'))
-                crumbs_added.append('6')
-
-            # 'H' before tail start_kernel (existing, now last)
-            if stripped == 'tail start_kernel' and 'H' not in crumbs_added:
-                # insert BEFORE this line — remove the line we just added and re-add
-                out.pop()  # remove the tail start_kernel we just appended
-                out.extend(make_crumb('0x48', 'head.S complete'))
-                out.append(line)  # re-add tail start_kernel
-                crumbs_added.append('H')
-
+            if not did['1'] and s == 'fence.i':
+                out.append(asm_breadcrumb('0x31', indent))
+                did['1'] = True
+            elif not did['2'] and s == 'call reset_regs':
+                out.append(asm_breadcrumb('0x32', indent))
+                did['2'] = True
+            elif not did['3'] and s == '.Lpmp_done:':
+                out.append(asm_breadcrumb('0x33', indent))
+                did['3'] = True
+            elif not did['4'] and s == 'load_global_pointer':
+                out.append(asm_breadcrumb('0x34', indent, save_a0=True))
+                did['4'] = True
+            elif not did['5'] and s == '.Lclear_bss_done:':
+                out.append(asm_breadcrumb('0x35', indent, save_a0=True))
+                did['5'] = True
+            elif not did['7'] and s == 'call setup_vm':
+                out.append(asm_breadcrumb('0x37', indent))
+                did['7'] = True
+            elif not did['8'] and did['7'] and s == 'call .Lsetup_trap_vector':
+                out.append(asm_breadcrumb('0x38', indent))
+                did['8'] = True
+            elif not did['9'] and s == 'call soc_early_init':
+                out.append(asm_breadcrumb('0x39', indent))
+                did['9'] = True
+            elif not did['H'] and s == 'tail start_kernel':
+                out.pop()
+                out.append(asm_breadcrumb('0x48', indent))
+                out.append(line)
+                did['H'] = True
         with open(head_s, 'w') as f:
             f.writelines(out)
-        print(f'OK: head.S breadcrumbs added: {crumbs_added}')
-
-        # init/main.c: insert K, I, E breadcrumbs
+        for k, v in did.items():
+            print(f'  head.S breadcrumb {k}: {"OK" if v else "MISS"}')
         with open(main_c, 'r') as f:
             content = f.read()
-        rom_call = '((int(*)(unsigned char))0x4FC00054)'
+        rom_call = f'((int(*)(unsigned char)){ROM_PUTC})'
         k_done = i_done = e_done = False
         if '\tchar *command_line;' in content:
             content = content.replace(
                 '\tchar *command_line;',
-                '\t' + rom_call + '(0x4B); /* K = start_kernel */\n\tchar *command_line;', 1)
+                f'\t{rom_call}(0x4B); /* K */\n\tchar *command_line;', 1)
             k_done = True
         if '\tlocal_irq_disable();\n' in content:
             content = content.replace(
                 '\tlocal_irq_disable();\n',
-                '\tlocal_irq_disable();\n\t' + rom_call + '(0x49); /* I = past irq_disable */\n', 1)
+                f'\tlocal_irq_disable();\n\t{rom_call}(0x49); /* I */\n', 1)
             i_done = True
         if '\tlocal_irq_enable();' in content:
             content = content.replace(
                 '\tlocal_irq_enable();',
-                '\t' + rom_call + '(0x45); /* E = about to enable IRQ */\n\tlocal_irq_enable();', 1)
+                f'\t{rom_call}(0x45); /* E */\n\tlocal_irq_enable();', 1)
             e_done = True
         with open(main_c, 'w') as f:
             f.write(content)
@@ -346,6 +333,9 @@ jobs:
         else
           echo "OK: SPINWAIT disabled"
         fi
+
+        echo "=== SMP/SPINWAIT/NR_CPUS status ==="
+        grep -E "CONFIG_SMP|SPINWAIT|NR_CPUS" "$CONFIG" || echo "(none found)"
 
         if [ $FAIL -ne 0 ]; then
           echo "BUILD VERIFICATION FAILED"; exit 1
