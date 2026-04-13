@@ -139,6 +139,8 @@ jobs:
           echo 'config BENVISOR_CONSOLE'                                         >> "${LINUX_DIR}/drivers/tty/serial/Kconfig"
           printf '\tbool "BenVisor IPC console"\n'                               >> "${LINUX_DIR}/drivers/tty/serial/Kconfig"
           printf '\tdepends on RISCV\n'                                          >> "${LINUX_DIR}/drivers/tty/serial/Kconfig"
+          printf '\tselect SERIAL_CORE\n'                                        >> "${LINUX_DIR}/drivers/tty/serial/Kconfig"
+          printf '\tselect SERIAL_EARLYCON\n'                                    >> "${LINUX_DIR}/drivers/tty/serial/Kconfig"
           printf '\thelp\n'                                                      >> "${LINUX_DIR}/drivers/tty/serial/Kconfig"
           printf '\t  Console via shared SRAM ring buffer to BenOS.\n'           >> "${LINUX_DIR}/drivers/tty/serial/Kconfig"
           echo "OK: Console Kconfig added"
@@ -220,6 +222,18 @@ jobs:
           echo "OK: PAGE_OFFSET=0x4a000000"
         else
           echo "FATAL: PAGE_OFFSET wrong"; grep PAGE_OFFSET "$CONFIG"; FAIL=1
+        fi
+
+        if grep -q "CONFIG_SERIAL_EARLYCON=y" "$CONFIG"; then
+          echo "OK: SERIAL_EARLYCON enabled"
+        else
+          echo "FATAL: SERIAL_EARLYCON not set (earlycon driver will be dead code)"; FAIL=1
+        fi
+
+        if grep -q "CONFIG_BENVISOR_CONSOLE=y" "$CONFIG"; then
+          echo "OK: BENVISOR_CONSOLE enabled"
+        else
+          echo "WARN: BENVISOR_CONSOLE not set"
         fi
 
         if [ $FAIL -ne 0 ]; then
