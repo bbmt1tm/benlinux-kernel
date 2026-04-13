@@ -337,6 +337,16 @@ jobs:
         echo "=== SMP/SPINWAIT/NR_CPUS status ==="
         grep -E "CONFIG_SMP|SPINWAIT|NR_CPUS" "$CONFIG" || echo "(none found)"
 
+        echo ""
+        echo "=== CRITICAL: Boot-path Configuration ==="
+        for sym in CONFIG_SMP CONFIG_RISCV_BOOT_SPINWAIT CONFIG_NR_CPUS \
+                   CONFIG_RISCV_M_MODE CONFIG_MMU CONFIG_FPU \
+                   CONFIG_RISCV_ISA_C CONFIG_EFI CONFIG_XIP_KERNEL \
+                   CONFIG_BUILTIN_DTB CONFIG_SHADOW_CALL_STACK; do
+            VAL=$(grep "^${sym}=" "$CONFIG" 2>/dev/null || grep "^# ${sym} is not set" "$CONFIG" 2>/dev/null || echo "${sym}: NOT FOUND")
+            echo "  $VAL"
+        done
+
         if [ $FAIL -ne 0 ]; then
           echo "BUILD VERIFICATION FAILED"; exit 1
         fi
