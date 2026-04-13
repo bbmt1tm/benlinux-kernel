@@ -151,6 +151,8 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 	u32 freq;
 	void __iomem *base;
 
+	pr_info("esp32p4-timer: init starting\n");
+
 	/* Map mtimecmp SRAM region from DT (8 bytes: lo + hi) */
 	base = of_iomap(np, 0);
 	if (!base) {
@@ -160,16 +162,19 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 
 	mtimecmp_lo = (volatile u32 __iomem *)base;
 	mtimecmp_hi = (volatile u32 __iomem *)(base + 4);
+	pr_info("esp32p4-timer: mtimecmp mapped at %p\n", base);
 
 	/* Read timebase frequency from DT */
 	if (of_property_read_u32(np, "timebase-frequency", &freq)) {
 		pr_err("esp32p4-timer: missing timebase-frequency\n");
 		return -EINVAL;
 	}
+	pr_info("esp32p4-timer: freq=%u Hz\n", freq);
 
 	/* Disable timer initially */
 	writel(0xFFFFFFFF, mtimecmp_lo);
 	writel(0xFFFFFFFF, mtimecmp_hi);
+	pr_info("esp32p4-timer: mtimecmp disabled\n");
 
 	/* Register clocksource */
 	ret = clocksource_register_hz(&esp32p4_cs, freq);
@@ -177,11 +182,14 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 		pr_err("esp32p4-timer: clocksource failed: %d\n", ret);
 		return ret;
 	}
+	pr_info("esp32p4-timer: clocksource registered\n");
 
 	sched_clock_register(esp32p4_sched_clock, 64, freq);
+	pr_info("esp32p4-timer: sched_clock registered\n");
 
 	/* Parse timer interrupt (IRQ 7 = machine timer) */
 	irq = irq_of_parse_and_map(np, 0);
+	pr_info("esp32p4-timer: irq_of_parse_and_map returned %d\n", irq);
 	if (!irq) {
 		pr_err("esp32p4-timer: no interrupt in DT\n");
 		return -EINVAL;
@@ -195,6 +203,7 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 	esp32p4_ce.set_next_event	= esp32p4_set_next_event;
 	esp32p4_ce.set_state_shutdown	= esp32p4_timer_shutdown;
 	esp32p4_ce.set_state_oneshot	= esp32p4_timer_shutdown;
+	pr_info("esp32p4-timer: clock_event configured, requesting IRQ %d\n", irq);
 
 	ret = request_irq(irq, esp32p4_timer_interrupt,
 			  IRQF_TIMER | IRQF_IRQPOLL,
@@ -203,12 +212,14 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 		pr_err("esp32p4-timer: IRQ %d request failed: %d\n", irq, ret);
 		return ret;
 	}
+	pr_info("esp32p4-timer: IRQ registered\n");
 
+	pr_info("esp32p4-timer: calling clockevents_config_and_register\n");
 	clockevents_config_and_register(&esp32p4_ce, freq,
 					100,		/* min delta ticks */
 					0x7FFFFFFF);	/* max delta ticks */
 
-	pr_info("esp32p4-timer: registered (%u MHz, IRQ %d)\n",
+	pr_info("esp32p4-timer: fully registered (%u MHz, IRQ %d)\n",
 		freq / 1000000, irq);
 	return 0;
 }
