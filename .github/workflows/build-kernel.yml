@@ -162,23 +162,71 @@ jobs:
         head_s = sys.argv[1]
         main_c = sys.argv[2]
 
-        # head.S: insert 'H' breadcrumb before first "tail start_kernel"
+        # ROM putc call template (saves/restores a0 and ra)
+        def make_crumb(char_hex, label):
+            return [
+                f'\t/* BenLinux breadcrumb: {label} */\n',
+                f'\tmv t1, a0\n',
+                f'\tmv t2, ra\n',
+                f'\tli a0, {char_hex}\n',
+                f'\tli t0, 0x4FC00054\n',
+                f'\tjalr ra, t0, 0\n',
+                f'\tmv a0, t1\n',
+                f'\tmv ra, t2\n',
+            ]
+
+        # head.S: insert breadcrumbs at multiple stages
         with open(head_s, 'r') as f:
             lines = f.readlines()
+
         out = []
-        patched = False
-        for line in lines:
-            if not patched and line.strip() == 'tail start_kernel':
-                indent = line[:len(line) - len(line.lstrip())]
-                out.append(indent + '/* BenLinux breadcrumb: head.S complete */\n')
-                out.append(indent + 'li a0, 0x48\n')
-                out.append(indent + 'li t0, 0x4FC00054\n')
-                out.append(indent + 'jalr ra, t0, 0\n')
-                patched = True
+        crumbs_added = []
+
+        for i, line in enumerate(lines):
             out.append(line)
+            stripped = line.strip()
+
+            # '1' after fence.i (early in boot, proves first instructions ran)
+            if stripped == 'fence.i' and '1' not in crumbs_added:
+                out.extend(make_crumb('0x31', 'post fence.i'))
+                crumbs_added.append('1')
+
+            # '2' after .Lpmp_done: label (PMP writes complete)
+            if stripped == '.Lpmp_done:' and '2' not in crumbs_added:
+                out.extend(make_crumb('0x32', 'post PMP'))
+                crumbs_added.append('2')
+
+            # '3' after __bss_stop reference in BSS clear (look for bltu back to .Lclear_bss)
+            if '.Lclear_bss' in stripped and 'bltu' in stripped and '3' not in crumbs_added:
+                out.extend(make_crumb('0x33', 'post BSS clear'))
+                crumbs_added.append('3')
+
+            # '4' after init_thread_union stack setup
+            if 'init_thread_union' in stripped and '4' not in crumbs_added:
+                out.extend(make_crumb('0x34', 'post stack setup'))
+                crumbs_added.append('4')
+
+            # '5' after call setup_vm
+            if stripped == 'call setup_vm' and '5' not in crumbs_added:
+                out.extend(make_crumb('0x35', 'post setup_vm'))
+                crumbs_added.append('5')
+
+            # '6' after call soc_early_init
+            if stripped == 'call soc_early_init' and '6' not in crumbs_added:
+                out.extend(make_crumb('0x36', 'post soc_early_init'))
+                crumbs_added.append('6')
+
+            # 'H' before tail start_kernel (existing, now last)
+            if stripped == 'tail start_kernel' and 'H' not in crumbs_added:
+                # insert BEFORE this line — remove the line we just added and re-add
+                out.pop()  # remove the tail start_kernel we just appended
+                out.extend(make_crumb('0x48', 'head.S complete'))
+                out.append(line)  # re-add tail start_kernel
+                crumbs_added.append('H')
+
         with open(head_s, 'w') as f:
             f.writelines(out)
-        print('OK: head.S breadcrumb (H) added' if patched else 'WARN: tail start_kernel not found')
+        print(f'OK: head.S breadcrumbs added: {crumbs_added}')
 
         # init/main.c: insert K, I, E breadcrumbs
         with open(main_c, 'r') as f:
@@ -291,6 +339,12 @@ jobs:
           echo "OK: BENVISOR_CONSOLE enabled"
         else
           echo "WARN: BENVISOR_CONSOLE not set"
+        fi
+
+        if grep -q "CONFIG_RISCV_BOOT_SPINWAIT=y" "$CONFIG"; then
+          echo "FATAL: SPINWAIT enabled (amoadd.w may hang on PSRAM)"; FAIL=1
+        else
+          echo "OK: SPINWAIT disabled"
         fi
 
         if [ $FAIL -ne 0 ]; then
