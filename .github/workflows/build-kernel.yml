@@ -251,6 +251,14 @@ jobs:
           echo "OK: SPINWAIT disabled"
         fi
 
+        for dbg_opt in DEBUG_SPINLOCK DEBUG_MUTEXES PROVE_LOCKING DEBUG_LOCK_ALLOC; do
+          if grep -q "CONFIG_${dbg_opt}=y" "$CONFIG"; then
+            echo "FATAL: CONFIG_${dbg_opt}=y (causes rwlock bad magic on UP)"; FAIL=1
+          else
+            echo "OK: ${dbg_opt} disabled"
+          fi
+        done
+
         echo "=== SMP/SPINWAIT/NR_CPUS status ==="
         grep -E "CONFIG_SMP|SPINWAIT|NR_CPUS" "$CONFIG" || echo "(none found)"
 
@@ -260,7 +268,8 @@ jobs:
                    CONFIG_RISCV_M_MODE CONFIG_MMU CONFIG_FPU \
                    CONFIG_RISCV_ISA_C CONFIG_EFI CONFIG_XIP_KERNEL \
                    CONFIG_BUILTIN_DTB CONFIG_SHADOW_CALL_STACK \
-                   CONFIG_DEBUG_SPINLOCK CONFIG_DEBUG_KERNEL CONFIG_KALLSYMS; do
+                   CONFIG_DEBUG_SPINLOCK CONFIG_DEBUG_KERNEL CONFIG_KALLSYMS \
+                   CONFIG_DEBUG_MUTEXES CONFIG_PROVE_LOCKING CONFIG_DEBUG_LOCK_ALLOC; do
             VAL=$(grep "^${sym}=" "$CONFIG" 2>/dev/null || grep "^# ${sym} is not set" "$CONFIG" 2>/dev/null || echo "${sym}: NOT FOUND")
             echo "  $VAL"
         done
