@@ -297,6 +297,46 @@ jobs:
           echo "BUILD VERIFICATION FAILED"; exit 1
         fi
 
+        # === Memory layout from System.map ===
+        echo ""
+        echo "=== Kernel Memory Layout (from System.map) ==="
+        SYSMAP="${LINUX_DIR}/System.map"
+        if [ -f "$SYSMAP" ]; then
+          PAGE_OFF="0x48200000"
+          echo "PAGE_OFFSET = $PAGE_OFF"
+          echo ""
+          for sym in _text _stext _etext _sdata _edata __bss_start __bss_stop _end __init_begin __init_end; do
+            ADDR=$(grep " $sym\$" "$SYSMAP" | head -1 | awk '{print $1}')
+            if [ -n "$ADDR" ]; then
+              OFFSET=$((0x$ADDR - 0x48200000))
+              OFFSET_MB=$(echo "scale=2; $OFFSET / 1048576" | bc)
+              echo "  $sym = 0x$ADDR  (PAGE_OFFSET + ${OFFSET_MB}MB)"
+            fi
+          done
+          echo ""
+          BSS_STOP=$(grep " __bss_stop\$" "$SYSMAP" | head -1 | awk '{print $1}')
+          END=$(grep " _end\$" "$SYSMAP" | head -1 | awk '{print $1}')
+          if [ -n "$BSS_STOP" ]; then
+            echo "*** DTB must be placed ABOVE 0x$BSS_STOP ***"
+            BSS_OFF=$((0x$BSS_STOP - 0x48200000))
+            BSS_MB=$(echo "scale=2; $BSS_OFF / 1048576" | bc)
+            echo "*** BSS ends at PAGE_OFFSET + ${BSS_MB}MB ***"
+            if [ $((0x$BSS_STOP)) -gt $((0x48A00000)) ]; then
+              echo "*** WARNING: __bss_stop (0x$BSS_STOP) > old DTB addr (0x48A00000)! ***"
+              echo "*** This confirms DTB was being wiped by BSS clear! ***"
+            else
+              echo "    __bss_stop is below old DTB addr (0x48A00000) — DTB was safe"
+            fi
+          fi
+          if [ -n "$END" ]; then
+            END_OFF=$((0x$END - 0x48200000))
+            END_MB=$(echo "scale=2; $END_OFF / 1048576" | bc)
+            echo "*** _end (total kernel footprint) = PAGE_OFFSET + ${END_MB}MB ***"
+          fi
+        else
+          echo "WARN: System.map not found"
+        fi
+
     - name: Verify Image
       run: |
         IMAGE="buildroot/output/images/Image"
