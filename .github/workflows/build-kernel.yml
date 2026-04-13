@@ -151,96 +151,13 @@ jobs:
         fi
 
         # ==================================================
-        # PATCH 5: Boot breadcrumbs — ROM UART at key points
+        # PATCH 5: Boot breadcrumbs — DISABLED
         # ==================================================
-        echo "=== Adding boot breadcrumbs ==="
-        HEAD_S="${LINUX_DIR}/arch/riscv/kernel/head.S"
-        MAIN_C="${LINUX_DIR}/init/main.c"
-
-        cat > /tmp/add_breadcrumbs.py << 'BREADCRUMB_EOF'
-        import sys
-        ROM_PUTC = '0x4FC00054'
-        def asm_breadcrumb(char_hex, indent='\t', save_a0=False):
-            lines = [f'{indent}/* BenLinux breadcrumb: {char_hex} */\n']
-            if save_a0:
-                lines.append(f'{indent}csrw 0x340, a0\n')
-            lines.append(f'{indent}li a0, {char_hex}\n')
-            lines.append(f'{indent}li t0, {ROM_PUTC}\n')
-            lines.append(f'{indent}jalr ra, t0, 0\n')
-            if save_a0:
-                lines.append(f'{indent}csrr a0, 0x340\n')
-            return ''.join(lines)
-        head_s = sys.argv[1]
-        main_c = sys.argv[2]
-        with open(head_s, 'r') as f:
-            lines = f.readlines()
-        out = []
-        did = {k: False for k in ['0','1','2','3','4','5','7','8','9','H']}
-        for i, line in enumerate(lines):
-            s = line.strip()
-            indent = line[:len(line) - len(line.lstrip())] or '\t'
-            if not did['0'] and s == 'csrw CSR_IE, zero':
-                out.append(asm_breadcrumb('0x30', indent))
-                did['0'] = True
-            out.append(line)
-            if not did['1'] and s == 'fence.i':
-                out.append(asm_breadcrumb('0x31', indent))
-                did['1'] = True
-            elif not did['2'] and s == 'call reset_regs':
-                out.append(asm_breadcrumb('0x32', indent))
-                did['2'] = True
-            elif not did['3'] and s == '.Lpmp_done:':
-                out.append(asm_breadcrumb('0x33', indent))
-                did['3'] = True
-            elif not did['4'] and s == 'load_global_pointer':
-                out.append(asm_breadcrumb('0x34', indent, save_a0=True))
-                did['4'] = True
-            elif not did['5'] and s == '.Lclear_bss_done:':
-                out.append(asm_breadcrumb('0x35', indent, save_a0=True))
-                did['5'] = True
-            elif not did['7'] and s == 'call setup_vm':
-                out.append(asm_breadcrumb('0x37', indent))
-                did['7'] = True
-            elif not did['8'] and did['7'] and s == 'call .Lsetup_trap_vector':
-                out.append(asm_breadcrumb('0x38', indent))
-                did['8'] = True
-            elif not did['9'] and s == 'call soc_early_init':
-                out.append(asm_breadcrumb('0x39', indent))
-                did['9'] = True
-            elif not did['H'] and s == 'tail start_kernel':
-                out.pop()
-                out.append(asm_breadcrumb('0x48', indent))
-                out.append(line)
-                did['H'] = True
-        with open(head_s, 'w') as f:
-            f.writelines(out)
-        for k, v in did.items():
-            print(f'  head.S breadcrumb {k}: {"OK" if v else "MISS"}')
-        with open(main_c, 'r') as f:
-            content = f.read()
-        rom_call = f'((int(*)(unsigned char)){ROM_PUTC})'
-        k_done = i_done = e_done = False
-        if '\tchar *command_line;' in content:
-            content = content.replace(
-                '\tchar *command_line;',
-                f'\t{rom_call}(0x4B); /* K */\n\tchar *command_line;', 1)
-            k_done = True
-        if '\tlocal_irq_disable();\n' in content:
-            content = content.replace(
-                '\tlocal_irq_disable();\n',
-                f'\tlocal_irq_disable();\n\t{rom_call}(0x49); /* I */\n', 1)
-            i_done = True
-        if '\tlocal_irq_enable();' in content:
-            content = content.replace(
-                '\tlocal_irq_enable();',
-                f'\t{rom_call}(0x45); /* E */\n\tlocal_irq_enable();', 1)
-            e_done = True
-        with open(main_c, 'w') as f:
-            f.write(content)
-        print(f'OK: init/main.c breadcrumbs: K={k_done} I={i_done} E={e_done}')
-        BREADCRUMB_EOF
-
-        python3 /tmp/add_breadcrumbs.py "$HEAD_S" "$MAIN_C"
+        # Breadcrumbs in head.S call ROM UART which needs stack.
+        # Between reset_regs (sp=0) and la sp, init_thread_union,
+        # ROM calls fault → kernel derailed. Disabled until we
+        # implement a stackless breadcrumb approach.
+        echo "=== Boot breadcrumbs: DISABLED (ROM needs stack, sp=0 crashes) ==="
 
         echo "=== All kernel modifications applied ==="
 
