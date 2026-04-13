@@ -159,6 +159,19 @@ jobs:
         # implement a stackless breadcrumb approach.
         echo "=== Boot breadcrumbs: DISABLED (ROM needs stack, sp=0 crashes) ==="
 
+        # ==================================================
+        # PATCH 6: head.S — CLIC mtvec.MODE=3
+        # ==================================================
+        # The kernel writes mtvec with MODE=0 (direct). On ESP32-P4 CLIC,
+        # MODE must be 3 for mtvt-vectored interrupts (BenVisor ISR) to work.
+        # If mtvec[1:0] is WARL to 3 on P4, this is a harmless no-op.
+        # If not, it's essential for timer bridging after local_irq_enable().
+        echo "=== Patching head.S for CLIC mtvec.MODE=3 ==="
+        HEAD_S="${LINUX_DIR}/arch/riscv/kernel/head.S"
+        sed -i 's/\([ \t]*\)csrw CSR_TVEC, \(a[0-9]\)/\1ori \2, \2, 3\n\1csrw CSR_TVEC, \2/' "$HEAD_S"
+        MTVEC_COUNT=$(grep -c "ori.*a.*, 3" "$HEAD_S" || true)
+        echo "OK: head.S patched — $MTVEC_COUNT mtvec writes now set MODE=3"
+
         echo "=== All kernel modifications applied ==="
 
     - name: Build kernel and rootfs
