@@ -248,6 +248,17 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 
 	pr_info("esp32p4-timer: fully registered (%u MHz, IRQ %d)\n",
 		freq / 1000000, irq);
+
+	/* Diagnostic: read mtvec from Core 1 kernel context.
+	 * If MODE=3, CLIC mtvt vectoring is active (BenVisor ISR works).
+	 * If MODE=0, kernel overwrote it — the ori patch didn't apply. */
+	{
+		u32 mtvec_val, mtvt_val;
+		asm volatile("csrr %0, mtvec" : "=r"(mtvec_val));
+		asm volatile("csrr %0, 0x307" : "=r"(mtvt_val));  /* mtvt CSR */
+		pr_info("esp32p4-timer: mtvec=0x%08x (MODE=%u) mtvt=0x%08x\n",
+			mtvec_val, mtvec_val & 3, mtvt_val);
+	}
 	return 0;
 }
 
