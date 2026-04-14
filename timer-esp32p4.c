@@ -259,6 +259,36 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 		pr_info("esp32p4-timer: mtvec=0x%08x (MODE=%u) mtvt=0x%08x\n",
 			mtvec_val, mtvec_val & 3, mtvt_val);
 	}
+
+	/* Diagnostic: full interrupt chain state from Core 1 */
+	{
+		u32 mie_val, mstatus_val, conf, int_ena, int_st;
+		u8 clic24_ip, clic24_ie, clic24_attr, clic24_ctl;
+		u8 clic7_ip, clic7_ie, clic7_attr, clic7_ctl;
+		asm volatile("csrr %0, mie" : "=r"(mie_val));
+		asm volatile("csrr %0, mstatus" : "=r"(mstatus_val));
+		conf    = *(volatile u32 *)0x500E2000;  /* SYSTIMER_CONF */
+		int_ena = *(volatile u32 *)0x500E2064;  /* SYSTIMER_INT_ENA */
+		int_st  = *(volatile u32 *)0x500E2070;  /* SYSTIMER_INT_ST */
+		/* CLIC idx 24 (systimer → BenVisor ISR) — Core 1's CLIC */
+		clic24_ip   = *(volatile u8 *)0x20801060;
+		clic24_ie   = *(volatile u8 *)0x20801061;
+		clic24_attr = *(volatile u8 *)0x20801062;
+		clic24_ctl  = *(volatile u8 *)0x20801063;
+		/* CLIC int 7 (kernel timer interrupt) — Core 1's CLIC */
+		clic7_ip   = *(volatile u8 *)0x2080101C;
+		clic7_ie   = *(volatile u8 *)0x2080101D;
+		clic7_attr = *(volatile u8 *)0x2080101E;
+		clic7_ctl  = *(volatile u8 *)0x2080101F;
+		pr_info("esp32p4-timer: mie=0x%08x mstatus=0x%08x\n",
+			mie_val, mstatus_val);
+		pr_info("esp32p4-timer: systimer conf=0x%08x int_ena=0x%x int_st=0x%x\n",
+			conf, int_ena, int_st);
+		pr_info("esp32p4-timer: CLIC24(systimer) IP=%u IE=%u ATTR=0x%02x CTL=0x%02x\n",
+			clic24_ip, clic24_ie, clic24_attr, clic24_ctl);
+		pr_info("esp32p4-timer: CLIC7(timer-irq) IP=%u IE=%u ATTR=0x%02x CTL=0x%02x\n",
+			clic7_ip, clic7_ie, clic7_attr, clic7_ctl);
+	}
 	return 0;
 }
 
