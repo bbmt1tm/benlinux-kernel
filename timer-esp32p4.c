@@ -205,11 +205,6 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 	esp32p4_ce.set_state_oneshot	= esp32p4_timer_shutdown;
 	pr_info("esp32p4-timer: clock_event configured, requesting IRQ %d\n", irq);
 
-	/* TEMPORARY: Skip request_irq to test if kernel continues booting.
-	 * Without this, the kernel won't get timer ticks, but we can see
-	 * if start_kernel() progresses past time_init(). */
-	pr_info("esp32p4-timer: SKIPPING request_irq (debug) — no timer ticks\n");
-#if 0
 	ret = request_irq(irq, esp32p4_timer_interrupt,
 			  IRQF_TIMER | IRQF_IRQPOLL,
 			  "esp32p4-timer", &esp32p4_ce);
@@ -218,7 +213,6 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 		return ret;
 	}
 	pr_info("esp32p4-timer: IRQ registered\n");
-#endif
 
 	pr_info("esp32p4-timer: calling clockevents_config_and_register\n");
 	clockevents_config_and_register(&esp32p4_ce, freq,
