@@ -206,18 +206,21 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 	pr_info("esp32p4-timer: clock_event configured, requesting IRQ %d\n", irq);
 
 	ret = request_irq(irq, esp32p4_timer_interrupt,
-			  IRQF_TIMER | IRQF_IRQPOLL,
+			  IRQF_TIMER | IRQF_IRQPOLL | IRQF_NOAUTOEN,
 			  "esp32p4-timer", &esp32p4_ce);
 	if (ret) {
 		pr_err("esp32p4-timer: IRQ %d request failed: %d\n", irq, ret);
 		return ret;
 	}
-	pr_info("esp32p4-timer: IRQ registered\n");
+	pr_info("esp32p4-timer: IRQ registered (NOAUTOEN)\n");
 
 	pr_info("esp32p4-timer: calling clockevents_config_and_register\n");
 	clockevents_config_and_register(&esp32p4_ce, freq,
 					100,		/* min delta ticks */
 					0x7FFFFFFF);	/* max delta ticks */
+
+	pr_info("esp32p4-timer: enabling IRQ %d\n", irq);
+	enable_irq(irq);
 
 	pr_info("esp32p4-timer: fully registered (%u MHz, IRQ %d)\n",
 		freq / 1000000, irq);
