@@ -438,6 +438,12 @@ jobs:
           echo "OK: SPINWAIT disabled"
         fi
 
+        if grep -q "CONFIG_RISCV_PROBE_UNALIGNED_ACCESS=y" "$CONFIG"; then
+          echo "FATAL: PROBE_UNALIGNED_ACCESS enabled (hangs on M-mode NOMMU)"; FAIL=1
+        else
+          echo "OK: PROBE_UNALIGNED_ACCESS disabled"
+        fi
+
         for dbg_opt in DEBUG_SPINLOCK DEBUG_MUTEXES PROVE_LOCKING DEBUG_LOCK_ALLOC; do
           if grep -q "CONFIG_${dbg_opt}=y" "$CONFIG"; then
             echo "FATAL: CONFIG_${dbg_opt}=y (causes rwlock bad magic on UP)"; FAIL=1
