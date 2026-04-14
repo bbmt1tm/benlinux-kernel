@@ -1,26 +1,22 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * ESP32-P4 Timer Driver for BenVisor Native Linux
+ * ESP32-P4 Timer Driver — Direct Systimer (No BenVisor ISR)
  *
- * This replaces timer-clint.c for the ESP32-P4 which has no standard CLINT.
+ * Architecture: the systimer alarm 1 interrupt is routed through the
+ * ESP32-P4 interrupt matrix to CLIC index 24. The kernel handles this
+ * interrupt directly — no BenVisor ISR in the loop.
  *
- * Clocksource: reads RISC-V CSR time/timeh directly (360 MHz on P4).
- * Clock events: writes mtimecmp to a shared SRAM location. BenVisor's
- *   systimer ISR polls mtimecmp and injects CLIC int 7 when the deadline
- *   passes. Linux sees a standard machine timer interrupt (cause 7).
+ * Clocksource: CSR time (360 MHz, CPU cycle counter)
+ * Clock events: systimer alarm 1 (16 MHz, one-shot mode)
+ *
+ * BenVisor sets up: interrupt matrix routing, CLIC24 config, initial alarm.
+ * This driver takes over: programs alarms, handles interrupts, clears INT_ST.
  *
  * DT compatible: "benos,esp32p4-timer"
  * DT properties:
- *   reg            = <MTIMECMP_SRAM_ADDR 8>  (lo + hi, 8 bytes)
- *   timebase-frequency = <360000000>
- *   interrupts-extended = <&intc 7>
- *
- * Hardware context (see 21_BENLINUX_SESSION_HANDOFF.md):
- *   - CSR time (0xC01) ticks at 360 MHz (CPU clock)
- *   - No CLINT MMIO exists on P4 (confirmed: store fault at 0x02004000)
- *   - BenVisor owns systimer Alarm 1 (16 MHz, 0x500E2000) and CLIC mtvt
- *   - BenVisor injects timer via CLIC int 7 pending bit (0x2080101C)
- *   - CLIC mcause = 0xB8000007 (needs irq-riscv-intc.c 12-bit mask patch)
+ *   reg               = <0x500E2000 0x100>  (systimer base)
+ *   timebase-frequency = <360000000>         (CPU clock for clocksource)
+ *   interrupts-extended = <&intc 24>         (CLIC index 24)
  */
 
 #include <linux/clockchips.h>
@@ -30,37 +26,63 @@
 #include <linux/irq.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_address.h>
 #include <linux/of_irq.h>
 #include <linux/percpu.h>
 #include <linux/sched_clock.h>
 #include <asm/csr.h>
 
-/* Shared SRAM: BenVisor reads, Linux writes */
-static volatile u32 __iomem *mtimecmp_lo;
-static volatile u32 __iomem *mtimecmp_hi;
+/* ========================================
+ * Systimer Hardware Registers
+ *
+ * ESP32-P4 systimer at 16 MHz (XTAL 40 MHz ÷ 2.5).
+ * One-shot alarm mode — periodic mode is broken on P4.
+ * Addresses hardcoded (chip-specific, M-mode direct access).
+ * ======================================== */
+
+#define SYSTIMER_BASE           0x500E2000
+
+#define ST_CONF                 (SYSTIMER_BASE + 0x00)
+#define ST_UNIT0_OP             (SYSTIMER_BASE + 0x04)
+#define ST_TARGET1_HI           (SYSTIMER_BASE + 0x24)
+#define ST_TARGET1_LO           (SYSTIMER_BASE + 0x28)
+#define ST_TARGET1_CONF         (SYSTIMER_BASE + 0x38)
+#define ST_UNIT0_VAL_HI         (SYSTIMER_BASE + 0x40)
+#define ST_UNIT0_VAL_LO         (SYSTIMER_BASE + 0x44)
+#define ST_COMP1_LOAD           (SYSTIMER_BASE + 0x54)
+#define ST_INT_ENA              (SYSTIMER_BASE + 0x64)
+#define ST_INT_CLR              (SYSTIMER_BASE + 0x6C)
+#define ST_INT_ST               (SYSTIMER_BASE + 0x70)
+
+#define ST_CONF_TARGET1_EN      (1 << 23)
+#define ST_INT_TARGET1          (1 << 1)
+#define ST_UNIT0_UPDATE         (1 << 30)
+
+#define SYSTIMER_FREQ_HZ        16000000
+#define CPU_FREQ_HZ             360000000
+
+/* Direct MMIO access — M-mode, NOMMU, no ioremap needed */
+static inline void st_write(u32 addr, u32 val)
+{
+	*(volatile u32 *)addr = val;
+}
+
+static inline u32 st_read(u32 addr)
+{
+	return *(volatile u32 *)addr;
+}
 
 /* Per-CPU clock event device — must use DEFINE_PER_CPU to match
- * riscv-intc's irq_set_percpu_devid() marking. Using request_irq
- * with a per_cpu_devid interrupt returns -EINVAL or hangs. */
+ * riscv-intc's irq_set_percpu_devid() marking. */
 static DEFINE_PER_CPU(struct clock_event_device, esp32p4_ce);
-
-/* IRQ number saved for enable/disable */
-static int timer_irq;
 
 /* ========================================
  * Clocksource: CSR time (64-bit, 360 MHz)
- *
- * Unlike timer-clint.c which reads mtime from MMIO,
- * we read directly from CSR time/timeh. On P4, this
- * returns the CPU cycle counter at 360 MHz.
  * ======================================== */
 
 static u64 esp32p4_read_time(void)
 {
 	u32 hi, lo;
 
-	/* RV32 64-bit read: re-read hi to detect lo rollover */
 	do {
 		hi = csr_read(CSR_TIMEH);
 		lo = csr_read(CSR_TIME);
@@ -88,62 +110,78 @@ static struct clocksource esp32p4_cs = {
 };
 
 /* ========================================
- * Clock events: SRAM mtimecmp
+ * Clock Events: Systimer Alarm 1 (one-shot)
  *
- * Linux writes the next deadline to mtimecmp in SRAM.
- * BenVisor polls this value from its systimer ISR.
- * When CSR time >= mtimecmp, BenVisor sets CLIC int 7
- * pending. Hardware delivers the interrupt to Linux.
+ * The kernel programs the next event in systimer ticks (16 MHz).
+ * The clockevent is registered at 16 MHz so delta is already
+ * in systimer ticks — no CPU/systimer conversion needed.
  * ======================================== */
 
 static int esp32p4_set_next_event(unsigned long delta,
 				  struct clock_event_device *ce)
 {
-	u64 next = esp32p4_read_time() + delta;
+	u32 conf;
 
-	/*
-	 * Write lo THEN hi. BenVisor reads hi first in its ISR,
-	 * so writing lo first avoids a race where BenVisor sees
-	 * new hi with old lo (which could be in the past).
-	 *
-	 * Worst case: BenVisor sees old hi + new lo → deadline
-	 * appears to be in the far past → injects one extra
-	 * timer interrupt → Linux handles it (writes max to
-	 * mtimecmp in its handler) → harmless.
-	 */
-	writel(next & 0xFFFFFFFF, mtimecmp_lo);
-	writel(next >> 32, mtimecmp_hi);
+	/* Disable alarm (clear TARGET1_EN, resets internal latch) */
+	conf = st_read(ST_CONF);
+	st_write(ST_CONF, conf & ~ST_CONF_TARGET1_EN);
+
+	/* Read current systimer counter */
+	st_write(ST_UNIT0_OP, ST_UNIT0_UPDATE);
+	{
+		u32 now_lo = st_read(ST_UNIT0_VAL_LO);
+		u32 now_hi = st_read(ST_UNIT0_VAL_HI);
+
+		/* Set target = now + delta (16 MHz ticks) */
+		u64 target = ((u64)now_hi << 32) | now_lo;
+		target += delta;
+		st_write(ST_TARGET1_HI, (u32)(target >> 32));
+		st_write(ST_TARGET1_LO, (u32)(target & 0xFFFFFFFF));
+	}
+
+	/* Load comparator */
+	st_write(ST_COMP1_LOAD, 1);
+
+	/* Clear any stale INT_ST before re-enabling */
+	st_write(ST_INT_CLR, ST_INT_TARGET1);
+
+	/* Re-enable alarm (0→1 transition restarts comparison) */
+	st_write(ST_CONF, conf | ST_CONF_TARGET1_EN);
 
 	return 0;
 }
 
 static int esp32p4_timer_shutdown(struct clock_event_device *ce)
 {
-	/* Write max to disable: time can never reach 0xFFFFFFFF_FFFFFFFF */
-	writel(0xFFFFFFFF, mtimecmp_lo);
-	writel(0xFFFFFFFF, mtimecmp_hi);
+	u32 conf = st_read(ST_CONF);
+	st_write(ST_CONF, conf & ~ST_CONF_TARGET1_EN);
+	st_write(ST_INT_CLR, ST_INT_TARGET1);
 	return 0;
 }
 
 /* ========================================
- * Timer interrupt handler
+ * Timer Interrupt Handler
  *
- * Called when CLIC int 7 fires (machine timer).
- * BenVisor injected this by setting CLIC int 7 IP.
+ * Called when systimer alarm 1 fires via CLIC index 24.
+ * Clears the interrupt source and lets the clockevent
+ * framework program the next event.
  * ======================================== */
 
 static irqreturn_t esp32p4_timer_interrupt(int irq, void *dev_id)
 {
 	struct clock_event_device *ce = this_cpu_ptr(&esp32p4_ce);
 
-	/*
-	 * Disable timer events until the next one is programmed.
-	 * This prevents BenVisor from re-injecting while Linux
-	 * processes this tick. The clock_event framework will call
-	 * set_next_event() to program the next deadline.
-	 */
-	writel(0xFFFFFFFF, mtimecmp_lo);
-	writel(0xFFFFFFFF, mtimecmp_hi);
+	/* Clear systimer INT_ST (must clear source before mret
+	 * since CLIC24 is edge-triggered — the clear+re-arm in
+	 * set_next_event creates the next rising edge) */
+	st_write(ST_INT_CLR, ST_INT_TARGET1);
+
+	/* Disable alarm until next event is programmed.
+	 * set_next_event will re-enable it. */
+	{
+		u32 conf = st_read(ST_CONF);
+		st_write(ST_CONF, conf & ~ST_CONF_TARGET1_EN);
+	}
 
 	ce->event_handler(ce);
 	return IRQ_HANDLED;
@@ -157,45 +195,51 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 {
 	int irq, ret;
 	u32 freq;
-	void __iomem *base;
 
-	pr_info("esp32p4-timer: init starting\n");
+	pr_info("esp32p4-timer: init starting (direct systimer mode)\n");
 
-	/* Map mtimecmp SRAM region from DT (8 bytes: lo + hi) */
-	base = of_iomap(np, 0);
-	if (!base) {
-		pr_err("esp32p4-timer: failed to map mtimecmp\n");
-		return -ENOMEM;
-	}
-
-	mtimecmp_lo = (volatile u32 __iomem *)base;
-	mtimecmp_hi = (volatile u32 __iomem *)(base + 4);
-	pr_info("esp32p4-timer: mtimecmp mapped at %p\n", base);
-
-	/* Read timebase frequency from DT */
+	/* Read CPU timebase frequency from DT (for clocksource) */
 	if (of_property_read_u32(np, "timebase-frequency", &freq)) {
 		pr_err("esp32p4-timer: missing timebase-frequency\n");
 		return -EINVAL;
 	}
-	pr_info("esp32p4-timer: freq=%u Hz\n", freq);
+	pr_info("esp32p4-timer: CPU freq=%u Hz, systimer freq=%u Hz\n",
+		freq, SYSTIMER_FREQ_HZ);
 
-	/* Disable timer initially */
-	writel(0xFFFFFFFF, mtimecmp_lo);
-	writel(0xFFFFFFFF, mtimecmp_hi);
-	pr_info("esp32p4-timer: mtimecmp disabled\n");
+	/* Confirm systimer is running: read counter */
+	st_write(ST_UNIT0_OP, ST_UNIT0_UPDATE);
+	pr_info("esp32p4-timer: systimer counter = 0x%08x_%08x\n",
+		st_read(ST_UNIT0_VAL_HI), st_read(ST_UNIT0_VAL_LO));
 
-	/* Register clocksource */
+	/* Ensure alarm 1 configured: one-shot, counter 0 */
+	st_write(ST_TARGET1_CONF, 0);  /* unit_sel=0, period_mode=0 */
+
+	/* Disable alarm initially */
+	{
+		u32 conf = st_read(ST_CONF);
+		st_write(ST_CONF, conf & ~ST_CONF_TARGET1_EN);
+	}
+	st_write(ST_INT_CLR, ST_INT_TARGET1);
+
+	/* Ensure alarm 1 interrupt is enabled in systimer */
+	{
+		u32 int_ena = st_read(ST_INT_ENA);
+		st_write(ST_INT_ENA, int_ena | ST_INT_TARGET1);
+	}
+	pr_info("esp32p4-timer: systimer alarm 1 configured (one-shot)\n");
+
+	/* Register clocksource at CPU frequency (360 MHz) */
 	ret = clocksource_register_hz(&esp32p4_cs, freq);
 	if (ret) {
 		pr_err("esp32p4-timer: clocksource failed: %d\n", ret);
 		return ret;
 	}
-	pr_info("esp32p4-timer: clocksource registered\n");
+	pr_info("esp32p4-timer: clocksource registered (360 MHz)\n");
 
 	sched_clock_register(esp32p4_sched_clock, 64, freq);
 	pr_info("esp32p4-timer: sched_clock registered\n");
 
-	/* Parse timer interrupt (IRQ 7 = machine timer) */
+	/* Parse interrupt (CLIC index 24 = systimer via interrupt matrix) */
 	irq = irq_of_parse_and_map(np, 0);
 	pr_info("esp32p4-timer: irq_of_parse_and_map returned %d\n", irq);
 	if (!irq) {
@@ -203,7 +247,9 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 		return -EINVAL;
 	}
 
-	/* Configure per-CPU clock event device */
+	/* Configure per-CPU clock event at SYSTIMER frequency (16 MHz).
+	 * Delta values from the clockevent framework are in systimer ticks.
+	 * No CPU→systimer conversion needed in set_next_event. */
 	{
 		struct clock_event_device *ce = this_cpu_ptr(&esp32p4_ce);
 		ce->name		= "esp32p4-timer";
@@ -214,81 +260,50 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 		ce->set_state_shutdown	= esp32p4_timer_shutdown;
 		ce->set_state_oneshot	= esp32p4_timer_shutdown;
 	}
-	pr_info("esp32p4-timer: clock_event configured\n");
 
-	/* Use request_percpu_irq — riscv-intc marks all interrupts as
-	 * per_cpu_devid via irq_set_percpu_devid(). Using request_irq
-	 * on a per_cpu_devid interrupt returns -EINVAL or hangs in
-	 * kzalloc(GFP_KERNEL) during early boot. */
-	timer_irq = irq;
+	/* Skip calibrate_delay busy-loop */
+	lpj_fine = freq / HZ;
+
+	/* Request percpu IRQ (riscv-intc marks all as per_cpu_devid) */
 	pr_info("esp32p4-timer: calling request_percpu_irq(%d)\n", irq);
 	ret = request_percpu_irq(irq, esp32p4_timer_interrupt,
 				 "esp32p4-timer", &esp32p4_ce);
 	if (ret) {
-		pr_err("esp32p4-timer: percpu IRQ %d request failed: %d\n", irq, ret);
+		pr_err("esp32p4-timer: percpu IRQ %d request failed: %d\n",
+		       irq, ret);
 		return ret;
 	}
-	pr_info("esp32p4-timer: percpu IRQ registered\n");
 
-	pr_info("esp32p4-timer: calling clockevents_config_and_register\n");
+	/* Register clockevent at SYSTIMER frequency */
 	{
 		struct clock_event_device *ce = this_cpu_ptr(&esp32p4_ce);
-
-		/* Skip calibrate_delay() busy-loop — it needs timer ticks
-		 * which aren't available until after local_irq_enable(). */
-		lpj_fine = freq / HZ;
-
-		clockevents_config_and_register(ce, freq,
-						100,		/* min delta ticks */
-						0x7FFFFFFF);	/* max delta ticks */
+		clockevents_config_and_register(ce, SYSTIMER_FREQ_HZ,
+						100,		/* min delta */
+						0x7FFFFFFF);	/* max delta */
 	}
 
-	pr_info("esp32p4-timer: enabling percpu IRQ %d\n", irq);
 	enable_percpu_irq(irq, IRQ_TYPE_NONE);
 
-	pr_info("esp32p4-timer: fully registered (%u MHz, IRQ %d)\n",
-		freq / 1000000, irq);
+	pr_info("esp32p4-timer: fully registered (clocksource=%u MHz, events=%u MHz, IRQ %d)\n",
+		freq / 1000000, SYSTIMER_FREQ_HZ / 1000000, irq);
 
-	/* Diagnostic: read mtvec from Core 1 kernel context.
-	 * If MODE=3, CLIC mtvt vectoring is active (BenVisor ISR works).
-	 * If MODE=0, kernel overwrote it — the ori patch didn't apply. */
+	/* Diagnostic: CLIC24 state from kernel context */
 	{
-		u32 mtvec_val, mtvt_val;
-		asm volatile("csrr %0, mtvec" : "=r"(mtvec_val));
-		asm volatile("csrr %0, 0x307" : "=r"(mtvt_val));  /* mtvt CSR */
-		pr_info("esp32p4-timer: mtvec=0x%08x (MODE=%u) mtvt=0x%08x\n",
-			mtvec_val, mtvec_val & 3, mtvt_val);
-	}
-
-	/* Diagnostic: full interrupt chain state from Core 1 */
-	{
-		u32 mie_val, mstatus_val, conf, int_ena, int_st;
+		u32 mtvec_val;
 		u8 clic24_ip, clic24_ie, clic24_attr, clic24_ctl;
-		u8 clic7_ip, clic7_ie, clic7_attr, clic7_ctl;
-		asm volatile("csrr %0, mie" : "=r"(mie_val));
-		asm volatile("csrr %0, mstatus" : "=r"(mstatus_val));
-		conf    = *(volatile u32 *)0x500E2000;  /* SYSTIMER_CONF */
-		int_ena = *(volatile u32 *)0x500E2064;  /* SYSTIMER_INT_ENA */
-		int_st  = *(volatile u32 *)0x500E2070;  /* SYSTIMER_INT_ST */
-		/* CLIC idx 24 (systimer → BenVisor ISR) — Core 1's CLIC */
+		asm volatile("csrr %0, mtvec" : "=r"(mtvec_val));
 		clic24_ip   = *(volatile u8 *)0x20801060;
 		clic24_ie   = *(volatile u8 *)0x20801061;
 		clic24_attr = *(volatile u8 *)0x20801062;
 		clic24_ctl  = *(volatile u8 *)0x20801063;
-		/* CLIC int 7 (kernel timer interrupt) — Core 1's CLIC */
-		clic7_ip   = *(volatile u8 *)0x2080101C;
-		clic7_ie   = *(volatile u8 *)0x2080101D;
-		clic7_attr = *(volatile u8 *)0x2080101E;
-		clic7_ctl  = *(volatile u8 *)0x2080101F;
-		pr_info("esp32p4-timer: mie=0x%08x mstatus=0x%08x\n",
-			mie_val, mstatus_val);
-		pr_info("esp32p4-timer: systimer conf=0x%08x int_ena=0x%x int_st=0x%x\n",
-			conf, int_ena, int_st);
-		pr_info("esp32p4-timer: CLIC24(systimer) IP=%u IE=%u ATTR=0x%02x CTL=0x%02x\n",
+		pr_info("esp32p4-timer: mtvec=0x%08x (MODE=%u)\n",
+			mtvec_val, mtvec_val & 3);
+		pr_info("esp32p4-timer: CLIC24 IP=%u IE=%u ATTR=0x%02x CTL=0x%02x\n",
 			clic24_ip, clic24_ie, clic24_attr, clic24_ctl);
-		pr_info("esp32p4-timer: CLIC7(timer-irq) IP=%u IE=%u ATTR=0x%02x CTL=0x%02x\n",
-			clic7_ip, clic7_ie, clic7_attr, clic7_ctl);
+		pr_info("esp32p4-timer: systimer int_ena=0x%x int_st=0x%x\n",
+			st_read(ST_INT_ENA), st_read(ST_INT_ST));
 	}
+
 	return 0;
 }
 
