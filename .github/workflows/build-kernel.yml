@@ -231,10 +231,6 @@ jobs:
         # ==================================================
         # PATCH 8: Post-local_irq_enable CLIC diagnostic
         # ==================================================
-        # The BenVisor ISR runs pre-kernel but dies after local_irq_enable().
-        # This diagnostic dumps the full CLIC/systimer state from init/main.c
-        # immediately after MIE goes to 1, then again after a 10ms delay.
-        # If the ISR fires, CLIC24 IP and SYSTIMER INT_ST will clear.
         echo "=== Adding post-irq_enable CLIC diagnostic ==="
         cat > /tmp/add_clic_diag.py << 'DIAGEOF'
         import sys
@@ -242,31 +238,29 @@ jobs:
             content = f.read()
         marker = '(0x45); /* E=after irq_enable */'
         if marker not in content:
-            print('WARN: E breadcrumb not found — skipping CLIC diagnostic')
+            print('WARN: E breadcrumb not found, skipping CLIC diagnostic')
             sys.exit(0)
-        diag = r'''
-	/* POST-IRQ-ENABLE: Full CLIC/systimer state dump from Core 1 */
-	{
-		unsigned int _mstatus, _int_st, _thresh, _clic24, _clic7, _cliccfg;
-		volatile unsigned int _i;
-		asm volatile("csrr %0, mstatus" : "=r"(_mstatus));
-		_int_st  = *(volatile unsigned int *)0x500E2070;  /* SYSTIMER_INT_ST */
-		_clic24  = *(volatile unsigned int *)0x20801060;  /* CLIC24: IP|IE|ATTR|CTL */
-		_clic7   = *(volatile unsigned int *)0x2080101C;  /* CLIC7:  IP|IE|ATTR|CTL */
-		_thresh  = *(volatile unsigned int *)0x20800008;  /* CLIC mintthresh MMIO */
-		_cliccfg = *(volatile unsigned int *)0x20800000;  /* CLIC cfg register */
-		printk("CLIC-POST-IRQ: mstatus=0x%08x ST=0x%x C24=0x%08x C7=0x%08x thresh=0x%08x cfg=0x%08x\n",
-			_mstatus, _int_st, _clic24, _clic7, _thresh, _cliccfg);
-		/* 10ms delay at 360MHz — allow ISR time to fire */
-		for (_i = 0; _i < 3600000; _i++) { asm volatile(""); }
-		asm volatile("csrr %0, mstatus" : "=r"(_mstatus));
-		_int_st  = *(volatile unsigned int *)0x500E2070;
-		_clic24  = *(volatile unsigned int *)0x20801060;
-		_clic7   = *(volatile unsigned int *)0x2080101C;
-		printk("CLIC-10ms-LATER: mstatus=0x%08x ST=0x%x C24=0x%08x C7=0x%08x\n",
-			_mstatus, _int_st, _clic24, _clic7);
-	}
-'''
+        diag = '\n'
+        diag += '    /* POST-IRQ-ENABLE: Full CLIC/systimer state dump */\n'
+        diag += '    {\n'
+        diag += '        unsigned int _mstatus, _int_st, _thresh, _clic24, _clic7, _cliccfg;\n'
+        diag += '        volatile unsigned int _i;\n'
+        diag += '        asm volatile("csrr %0, mstatus" : "=r"(_mstatus));\n'
+        diag += '        _int_st  = *(volatile unsigned int *)0x500E2070;\n'
+        diag += '        _clic24  = *(volatile unsigned int *)0x20801060;\n'
+        diag += '        _clic7   = *(volatile unsigned int *)0x2080101C;\n'
+        diag += '        _thresh  = *(volatile unsigned int *)0x20800008;\n'
+        diag += '        _cliccfg = *(volatile unsigned int *)0x20800000;\n'
+        diag += '        printk("CLIC-POST-IRQ: mstatus=0x%08x ST=0x%x C24=0x%08x C7=0x%08x thresh=0x%08x cfg=0x%08x\\n",\n'
+        diag += '            _mstatus, _int_st, _clic24, _clic7, _thresh, _cliccfg);\n'
+        diag += '        for (_i = 0; _i < 3600000; _i++) { asm volatile(""); }\n'
+        diag += '        asm volatile("csrr %0, mstatus" : "=r"(_mstatus));\n'
+        diag += '        _int_st  = *(volatile unsigned int *)0x500E2070;\n'
+        diag += '        _clic24  = *(volatile unsigned int *)0x20801060;\n'
+        diag += '        _clic7   = *(volatile unsigned int *)0x2080101C;\n'
+        diag += '        printk("CLIC-10ms-LATER: mstatus=0x%08x ST=0x%x C24=0x%08x C7=0x%08x\\n",\n'
+        diag += '            _mstatus, _int_st, _clic24, _clic7);\n'
+        diag += '    }\n'
         content = content.replace(marker, marker + diag, 1)
         with open(sys.argv[1], 'w') as f:
             f.write(content)
