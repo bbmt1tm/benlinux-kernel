@@ -163,24 +163,11 @@ jobs:
             content = f.read()
         rom = '((int(*)(unsigned char))0x4FC00054)'
         patches = 0
-        # PMA + K = start_kernel entry: set PMA non-cacheable BEFORE any MMIO reads
+        # K = start_kernel entry
         if '\tchar *command_line;' in content:
-            pma_code = '\t/* PMA: mark CLIC + peripheral regions non-cacheable on Core 1.\n'
-            pma_code += '\t * ESP-IDF configures PMA for Core 0 only. Without this,\n'
-            pma_code += '\t * L1/L2 cache returns stale kernel data for MMIO reads.\n'
-            pma_code += '\t * PMA_NAPOT|PMA_EN|PMA_R|PMA_W|PMA_NONCACHEABLE = 0xC8000019 */\n'
-            pma_code += '\tasm volatile(\n'
-            pma_code += '\t\t"csrw 0xBD0, %0\\n"  /* pma_addr0: CPU subsystem 256MB */\n'
-            pma_code += '\t\t"csrw 0xBC0, %1\\n"  /* pma_cfg0 */\n'
-            pma_code += '\t\t"csrw 0xBD1, %2\\n"  /* pma_addr1: HP peripherals 16MB */\n'
-            pma_code += '\t\t"csrw 0xBC1, %3\\n"  /* pma_cfg1 */\n'
-            pma_code += '\t\t"fence\\n"\n'
-            pma_code += '\t\t:: "r"(0x09FFFFFF), "r"(0xC8000019),\n'
-            pma_code += '\t\t   "r"(0x141FFFFF), "r"(0xC8000019)\n'
-            pma_code += '\t);\n'
             content = content.replace(
                 '\tchar *command_line;',
-                pma_code + '\t' + rom + '(0x4B); /* K=start_kernel */\n\tchar *command_line;', 1)
+                '\t' + rom + '(0x4B); /* K=start_kernel */\n\tchar *command_line;', 1)
             patches += 1
         # I = past local_irq_disable
         if '\tlocal_irq_disable();\n' in content:
@@ -192,7 +179,7 @@ jobs:
         if '\tlocal_irq_enable();' in content:
             content = content.replace(
                 '\tlocal_irq_enable();',
-                '\t' + rom + '(0x4C); /* L=before irq_enable */\n\t*(volatile unsigned int *)0x20800000 = 0x00000007; /* restore cliccfg before MIE=1 */\n\tlocal_irq_enable();\n\t' + rom + '(0x45); /* E=after irq_enable */\n', 1)
+                '\t' + rom + '(0x4C); /* L=before irq_enable */\n\tlocal_irq_enable();\n\t' + rom + '(0x45); /* E=after irq_enable */\n', 1)
             patches += 2
         with open(sys.argv[1], 'w') as f:
             f.write(content)
@@ -339,25 +326,23 @@ jobs:
         cd buildroot
         make -j$(nproc)
 
-        # LZ4 initramfs fix
+        # Initramfs compression check (LZ4 causes OOM on NOMMU)
         LINUX_DIR=$(ls -d output/build/linux-*/ | head -1)
         KCONFIG="${LINUX_DIR}/.config"
-        if ! grep -q "CONFIG_INITRAMFS_COMPRESSION_LZ4=y" "$KCONFIG"; then
-          echo "=== Fixing initramfs compression: forcing LZ4 ==="
-          PRE_SIZE=$(stat -c%s output/images/Image 2>/dev/null || echo 0)
+        if grep -q "CONFIG_INITRAMFS_COMPRESSION_LZ4=y" "$KCONFIG"; then
+          echo "=== WARNING: LZ4 still active — forcing NONE ==="
           sed -i 's/^CONFIG_INITRAMFS_COMPRESSION_.*=y/# &/' "$KCONFIG"
           sed -i '/CONFIG_INITRAMFS_COMPRESSION_LZ4/d' "$KCONFIG"
-          echo "CONFIG_INITRAMFS_COMPRESSION_LZ4=y" >> "$KCONFIG"
+          echo "CONFIG_INITRAMFS_COMPRESSION_NONE=y" >> "$KCONFIG"
           rm -f "${LINUX_DIR}/usr/initramfs_inc_data"
           rm -f "${LINUX_DIR}/usr/initramfs_data.o"
           rm -f "${LINUX_DIR}/usr/built-in.a"
           rm -f "${LINUX_DIR}/usr/.initramfs_inc_data.cmd"
           make -C "${LINUX_DIR}" ARCH=riscv olddefconfig
           make linux-rebuild -j$(nproc)
-          POST_SIZE=$(stat -c%s output/images/Image 2>/dev/null || echo 0)
-          echo "Image: ${PRE_SIZE} -> ${POST_SIZE} bytes"
         else
-          echo "=== LZ4 already active ==="
+          echo "=== Initramfs compression OK (not LZ4) ==="
+          grep "CONFIG_INITRAMFS_COMPRESSION" "$KCONFIG" || echo "(none found)"
         fi
 
     - name: Verify kernel configuration
