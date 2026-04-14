@@ -179,7 +179,7 @@ jobs:
         if '\tlocal_irq_enable();' in content:
             content = content.replace(
                 '\tlocal_irq_enable();',
-                '\t' + rom + '(0x4C); /* L=before irq_enable */\n\tlocal_irq_enable();\n\t' + rom + '(0x45); /* E=after irq_enable */\n', 1)
+                '\t' + rom + '(0x4C); /* L=before irq_enable */\n\t*(volatile unsigned int *)0x20800000 = 0x00000007; /* restore cliccfg before MIE=1 */\n\tlocal_irq_enable();\n\t' + rom + '(0x45); /* E=after irq_enable */\n', 1)
             patches += 2
         with open(sys.argv[1], 'w') as f:
             f.write(content)
