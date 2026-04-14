@@ -172,6 +172,28 @@ jobs:
         MTVEC_COUNT=$(grep -c "ori.*a.*, 3" "$HEAD_S" || true)
         echo "OK: head.S patched — $MTVEC_COUNT mtvec writes now set MODE=3"
 
+        # ==================================================
+        # PATCH 7: entry.S — CLIC exception cause extraction
+        # ==================================================
+        # On CLIC, mcause bits 27-30 contain MPP/MPIL even for exceptions.
+        # The kernel's exception dispatch does slli t0, s4, RISCV_LGPTR
+        # which left-shifts by 2 (for table index), but CLIC bits in 27-30
+        # produce huge indices. Replace with two-instruction sequence that
+        # extracts bits 11:0 and multiplies by 4 in one combined operation.
+        # Safe for both standard RISC-V and CLIC.
+        echo "=== Patching entry.S for CLIC exception cause masking ==="
+        ENTRY_S="${LINUX_DIR}/arch/riscv/kernel/entry.S"
+        sed -i '/slli t0, s4, RISCV_LGPTR/{
+          s/.*/\tslli t0, s4, 20/
+          a\\tsrli t0, t0, 18
+        }' "$ENTRY_S"
+        if grep -q "slli t0, s4, 20" "$ENTRY_S"; then
+          echo "OK: entry.S patched — exception cause masked to bits 11:0"
+        else
+          echo "WARN: entry.S patch may not have applied"
+          grep -n "slli.*s4" "$ENTRY_S" | head -5
+        fi
+
         echo "=== All kernel modifications applied ==="
 
     - name: Build kernel and rootfs
