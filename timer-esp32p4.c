@@ -26,10 +26,12 @@
 #include <linux/clockchips.h>
 #include <linux/clocksource.h>
 #include <linux/interrupt.h>
+#include <linux/irq.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
+#include <linux/percpu.h>
 #include <linux/sched_clock.h>
 #include <asm/csr.h>
 
@@ -37,8 +39,13 @@
 static volatile u32 __iomem *mtimecmp_lo;
 static volatile u32 __iomem *mtimecmp_hi;
 
-/* Per-CPU clock event device (single CPU for NOMMU) */
-static struct clock_event_device esp32p4_ce;
+/* Per-CPU clock event device — must use DEFINE_PER_CPU to match
+ * riscv-intc's irq_set_percpu_devid() marking. Using request_irq
+ * with a per_cpu_devid interrupt returns -EINVAL or hangs. */
+static DEFINE_PER_CPU(struct clock_event_device, esp32p4_ce);
+
+/* IRQ number saved for enable/disable */
+static int timer_irq;
 
 /* ========================================
  * Clocksource: CSR time (64-bit, 360 MHz)
@@ -126,7 +133,7 @@ static int esp32p4_timer_shutdown(struct clock_event_device *ce)
 
 static irqreturn_t esp32p4_timer_interrupt(int irq, void *dev_id)
 {
-	struct clock_event_device *ce = dev_id;
+	struct clock_event_device *ce = this_cpu_ptr(&esp32p4_ce);
 
 	/*
 	 * Disable timer events until the next one is programmed.
@@ -195,32 +202,43 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 		return -EINVAL;
 	}
 
-	/* Configure clock event device */
-	esp32p4_ce.name		= "esp32p4-timer";
-	esp32p4_ce.features	= CLOCK_EVT_FEAT_ONESHOT;
-	esp32p4_ce.rating	= 400;
-	esp32p4_ce.cpumask	= cpumask_of(0);
-	esp32p4_ce.set_next_event	= esp32p4_set_next_event;
-	esp32p4_ce.set_state_shutdown	= esp32p4_timer_shutdown;
-	esp32p4_ce.set_state_oneshot	= esp32p4_timer_shutdown;
-	pr_info("esp32p4-timer: clock_event configured, requesting IRQ %d\n", irq);
+	/* Configure per-CPU clock event device */
+	{
+		struct clock_event_device *ce = this_cpu_ptr(&esp32p4_ce);
+		ce->name		= "esp32p4-timer";
+		ce->features		= CLOCK_EVT_FEAT_ONESHOT;
+		ce->rating		= 400;
+		ce->cpumask		= cpumask_of(0);
+		ce->set_next_event	= esp32p4_set_next_event;
+		ce->set_state_shutdown	= esp32p4_timer_shutdown;
+		ce->set_state_oneshot	= esp32p4_timer_shutdown;
+	}
+	pr_info("esp32p4-timer: clock_event configured\n");
 
-	ret = request_irq(irq, esp32p4_timer_interrupt,
-			  IRQF_TIMER | IRQF_IRQPOLL | IRQF_NOAUTOEN,
-			  "esp32p4-timer", &esp32p4_ce);
+	/* Use request_percpu_irq — riscv-intc marks all interrupts as
+	 * per_cpu_devid via irq_set_percpu_devid(). Using request_irq
+	 * on a per_cpu_devid interrupt returns -EINVAL or hangs in
+	 * kzalloc(GFP_KERNEL) during early boot. */
+	timer_irq = irq;
+	pr_info("esp32p4-timer: calling request_percpu_irq(%d)\n", irq);
+	ret = request_percpu_irq(irq, esp32p4_timer_interrupt,
+				 "esp32p4-timer", &esp32p4_ce);
 	if (ret) {
-		pr_err("esp32p4-timer: IRQ %d request failed: %d\n", irq, ret);
+		pr_err("esp32p4-timer: percpu IRQ %d request failed: %d\n", irq, ret);
 		return ret;
 	}
-	pr_info("esp32p4-timer: IRQ registered (NOAUTOEN)\n");
+	pr_info("esp32p4-timer: percpu IRQ registered\n");
 
 	pr_info("esp32p4-timer: calling clockevents_config_and_register\n");
-	clockevents_config_and_register(&esp32p4_ce, freq,
-					100,		/* min delta ticks */
-					0x7FFFFFFF);	/* max delta ticks */
+	{
+		struct clock_event_device *ce = this_cpu_ptr(&esp32p4_ce);
+		clockevents_config_and_register(ce, freq,
+						100,		/* min delta ticks */
+						0x7FFFFFFF);	/* max delta ticks */
+	}
 
-	pr_info("esp32p4-timer: enabling IRQ %d\n", irq);
-	enable_irq(irq);
+	pr_info("esp32p4-timer: enabling percpu IRQ %d\n", irq);
+	enable_percpu_irq(irq, irq_get_trigger_type(irq));
 
 	pr_info("esp32p4-timer: fully registered (%u MHz, IRQ %d)\n",
 		freq / 1000000, irq);
