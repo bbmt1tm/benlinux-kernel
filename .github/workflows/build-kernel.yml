@@ -171,6 +171,10 @@ jobs:
         sed -i 's/\([ \t]*\)csrw CSR_TVEC, \(a[0-9]\)/\1ori \2, \2, 3\n\1csrw CSR_TVEC, \2/' "$HEAD_S"
         MTVEC_COUNT=$(grep -c "ori.*a.*, 3" "$HEAD_S" || true)
         echo "OK: head.S patched — $MTVEC_COUNT mtvec writes now set MODE=3"
+        echo "=== Verifying mtvec patch in head.S ==="
+        grep -n -B1 -A1 "csrw CSR_TVEC" "$HEAD_S" | head -30
+        echo "=== Verifying ori instructions ==="
+        grep -n "ori" "$HEAD_S" | head -10
 
         # ==================================================
         # PATCH 7: entry.S — CLIC exception cause extraction
@@ -193,6 +197,8 @@ jobs:
           echo "WARN: entry.S patch may not have applied"
           grep -n "slli.*s4" "$ENTRY_S" | head -5
         fi
+        echo "=== Verifying entry.S exception dispatch ==="
+        grep -n -A1 "slli.*s4" "$ENTRY_S" | head -10
 
         echo "=== All kernel modifications applied ==="
 
