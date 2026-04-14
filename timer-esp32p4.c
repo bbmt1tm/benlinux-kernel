@@ -122,6 +122,8 @@ static int esp32p4_set_next_event(unsigned long delta,
 {
 	u32 conf;
 
+	((int(*)(unsigned char))0x4FC00054)('S');  /* set_next_event entered */
+
 	/* Disable alarm (clear TARGET1_EN, resets internal latch) */
 	conf = st_read(ST_CONF);
 	st_write(ST_CONF, conf & ~ST_CONF_TARGET1_EN);
@@ -171,6 +173,9 @@ static irqreturn_t esp32p4_timer_interrupt(int irq, void *dev_id)
 {
 	struct clock_event_device *ce = this_cpu_ptr(&esp32p4_ce);
 
+	/* Breadcrumb: handler entered */
+	((int(*)(unsigned char))0x4FC00054)('T');
+
 	/* Clear systimer INT_ST (must clear source before mret
 	 * since CLIC24 is edge-triggered — the clear+re-arm in
 	 * set_next_event creates the next rising edge) */
@@ -183,7 +188,15 @@ static irqreturn_t esp32p4_timer_interrupt(int irq, void *dev_id)
 		st_write(ST_CONF, conf & ~ST_CONF_TARGET1_EN);
 	}
 
-	ce->event_handler(ce);
+	((int(*)(unsigned char))0x4FC00054)('1');
+
+	if (ce->event_handler) {
+		ce->event_handler(ce);
+		((int(*)(unsigned char))0x4FC00054)('2');
+	} else {
+		((int(*)(unsigned char))0x4FC00054)('N');  /* NULL handler! */
+	}
+
 	return IRQ_HANDLED;
 }
 
