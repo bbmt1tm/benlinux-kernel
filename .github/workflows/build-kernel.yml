@@ -241,32 +241,85 @@ jobs:
             print('WARN: E breadcrumb not found, skipping CLIC diagnostic')
             sys.exit(0)
         diag = '\n'
-        diag += '    /* POST-IRQ-ENABLE: Full CLIC/systimer state dump */\n'
+        diag += '    /* POST-IRQ-ENABLE: Full CLIC/systimer/mintstatus dump */\n'
         diag += '    {\n'
-        diag += '        unsigned int _mstatus, _int_st, _thresh, _clic24, _clic7, _cliccfg;\n'
+        diag += '        unsigned int _mstatus, _mintstatus, _mcause;\n'
+        diag += '        unsigned int _int_st, _thresh, _clic24, _clic7, _cliccfg;\n'
         diag += '        volatile unsigned int _i;\n'
         diag += '        asm volatile("csrr %0, mstatus" : "=r"(_mstatus));\n'
+        diag += '        asm volatile("csrr %0, 0xFB1" : "=r"(_mintstatus));\n'
+        diag += '        asm volatile("csrr %0, mcause" : "=r"(_mcause));\n'
         diag += '        _int_st  = *(volatile unsigned int *)0x500E2070;\n'
         diag += '        _clic24  = *(volatile unsigned int *)0x20801060;\n'
         diag += '        _clic7   = *(volatile unsigned int *)0x2080101C;\n'
         diag += '        _thresh  = *(volatile unsigned int *)0x20800008;\n'
         diag += '        _cliccfg = *(volatile unsigned int *)0x20800000;\n'
-        diag += '        printk("CLIC-POST-IRQ: mstatus=0x%08x ST=0x%x C24=0x%08x C7=0x%08x thresh=0x%08x cfg=0x%08x\\n",\n'
-        diag += '            _mstatus, _int_st, _clic24, _clic7, _thresh, _cliccfg);\n'
+        diag += '        printk("CLIC-DIAG: mstatus=0x%08x mintstatus=0x%08x MIL=%u mcause=0x%08x MPIL=%u\\n",\n'
+        diag += '            _mstatus, _mintstatus, (_mintstatus >> 24) & 0xFF,\n'
+        diag += '            _mcause, (_mcause >> 24) & 0xFF);\n'
+        diag += '        printk("CLIC-DIAG: ST=0x%x C24=0x%08x C7=0x%08x thresh=0x%08x cfg=0x%08x\\n",\n'
+        diag += '            _int_st, _clic24, _clic7, _thresh, _cliccfg);\n'
         diag += '        for (_i = 0; _i < 3600000; _i++) { asm volatile(""); }\n'
-        diag += '        asm volatile("csrr %0, mstatus" : "=r"(_mstatus));\n'
-        diag += '        _int_st  = *(volatile unsigned int *)0x500E2070;\n'
+        diag += '        asm volatile("csrr %0, 0xFB1" : "=r"(_mintstatus));\n'
+        diag += '        asm volatile("csrr %0, mcause" : "=r"(_mcause));\n'
         diag += '        _clic24  = *(volatile unsigned int *)0x20801060;\n'
-        diag += '        _clic7   = *(volatile unsigned int *)0x2080101C;\n'
-        diag += '        printk("CLIC-10ms-LATER: mstatus=0x%08x ST=0x%x C24=0x%08x C7=0x%08x\\n",\n'
-        diag += '            _mstatus, _int_st, _clic24, _clic7);\n'
+        diag += '        printk("CLIC-10ms: mintstatus=0x%08x MIL=%u mcause=0x%08x C24=0x%08x\\n",\n'
+        diag += '            _mintstatus, (_mintstatus >> 24) & 0xFF, _mcause, _clic24);\n'
         diag += '    }\n'
         content = content.replace(marker, marker + diag, 1)
         with open(sys.argv[1], 'w') as f:
             f.write(content)
-        print('OK: post-irq_enable CLIC diagnostic added')
+        print('OK: post-irq_enable CLIC diagnostic added (with mintstatus)')
         DIAGEOF
         python3 /tmp/add_clic_diag.py "$MAIN_C"
+
+        # ==================================================
+        # PATCH 9: entry.S — restore mcause before mret
+        # ==================================================
+        # CLIC mret restores mintstatus.MIL from mcause.MPIL (bits 27:24).
+        # Linux does NOT restore mcause before mret. Nested exceptions
+        # during boot (CSR probes → illegal instruction) corrupt MPIL,
+        # latching MIL at a high value and permanently blocking all
+        # interrupt delivery.
+        #
+        # ESP-IDF's vectors.S comment: "it is mandatory to restore mcause
+        # register since it contains the former CPU priority."
+        #
+        # Fix: load saved mcause from stack frame, write to CSR before mret.
+        # Insert after "csrw CSR_EPC" (a0 is free at that point).
+        echo "=== Patching entry.S for CLIC mcause restore ==="
+        ENTRY_S="${LINUX_DIR}/arch/riscv/kernel/entry.S"
+        cat > /tmp/patch_mcause.py << 'MCEOF'
+        import sys
+        with open(sys.argv[1], 'r') as f:
+            lines = f.readlines()
+        patched = False
+        out = []
+        for i, line in enumerate(lines):
+            out.append(line)
+            # Find "csrw CSR_EPC, a2" in ret_from_exception path
+            # Insert mcause restore immediately after it
+            if 'csrw CSR_EPC' in line and not patched:
+                # Determine indentation from current line
+                indent = line[:len(line) - len(line.lstrip())]
+                out.append(indent + '/*\n')
+                out.append(indent + ' * CLIC fix: restore mcause before mret.\n')
+                out.append(indent + ' * mret copies mcause.MPIL to mintstatus.MIL.\n')
+                out.append(indent + ' * Without this, nested exceptions corrupt MPIL\n')
+                out.append(indent + ' * and MIL gets stuck high, blocking all interrupts.\n')
+                out.append(indent + ' */\n')
+                out.append(indent + 'REG_L a0, PT_CAUSE(sp)\n')
+                out.append(indent + 'csrw CSR_CAUSE, a0\n')
+                patched = True
+                print(f'OK: mcause restore inserted after line {i+1}')
+        if not patched:
+            print('WARN: csrw CSR_EPC not found in entry.S')
+        with open(sys.argv[1], 'w') as f:
+            f.writelines(out)
+        MCEOF
+        python3 /tmp/patch_mcause.py "$ENTRY_S"
+        echo "=== Verifying mcause patch ==="
+        grep -n -B2 -A2 "CSR_CAUSE" "$ENTRY_S" | head -20
 
         echo "=== All kernel modifications applied ==="
 
