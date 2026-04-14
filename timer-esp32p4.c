@@ -176,6 +176,11 @@ static irqreturn_t esp32p4_timer_interrupt(int irq, void *dev_id)
 	 * set_next_event creates the next rising edge) */
 	st_write(ST_INT_CLR, ST_INT_TARGET1);
 
+	/* Restore CLIC config if corrupted — GZIP kernel build
+	 * corrupts cliccfg at 0x20800000 (reads 0x48xxxxxx instead
+	 * of 0x00000007). Without this, CLIC stops delivering. */
+	*(volatile u32 *)0x20800000 = 0x00000007;
+
 	/* Disable alarm until next event is programmed.
 	 * set_next_event will re-enable it. */
 	{
