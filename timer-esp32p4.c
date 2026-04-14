@@ -25,6 +25,7 @@
 
 #include <linux/clockchips.h>
 #include <linux/clocksource.h>
+#include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/module.h>
@@ -232,6 +233,11 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 	pr_info("esp32p4-timer: calling clockevents_config_and_register\n");
 	{
 		struct clock_event_device *ce = this_cpu_ptr(&esp32p4_ce);
+
+		/* Skip calibrate_delay() busy-loop — it needs timer ticks
+		 * which aren't available until after local_irq_enable(). */
+		lpj_fine = freq / HZ;
+
 		clockevents_config_and_register(ce, freq,
 						100,		/* min delta ticks */
 						0x7FFFFFFF);	/* max delta ticks */
