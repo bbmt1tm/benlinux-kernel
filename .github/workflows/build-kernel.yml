@@ -423,6 +423,20 @@ jobs:
         grep -E "CONFIG_SMP|SPINWAIT|NR_CPUS" "$CONFIG" || echo "(none found)"
 
         echo ""
+        echo "=== CRITICAL: Initramfs Compression ==="
+        echo "  (LZ4 allocates 8MB contiguous buffer — OOM on 16MB NOMMU)"
+        grep -E "INITRAMFS_COMPRESSION|CONFIG_RD_" "$CONFIG" | head -10
+        if grep -q "CONFIG_INITRAMFS_COMPRESSION_LZ4=y" "$CONFIG"; then
+          echo "FATAL: LZ4 initramfs still active — will OOM at boot!"; FAIL=1
+        elif grep -q "CONFIG_INITRAMFS_COMPRESSION_GZIP=y" "$CONFIG"; then
+          echo "OK: GZIP initramfs (48KB buffer)"
+        elif grep -q "CONFIG_INITRAMFS_COMPRESSION_NONE=y" "$CONFIG"; then
+          echo "OK: uncompressed initramfs"
+        else
+          echo "WARN: no initramfs compression detected — check config"
+        fi
+
+        echo ""
         echo "=== CRITICAL: Boot-path Configuration ==="
         for sym in CONFIG_SMP CONFIG_RISCV_BOOT_SPINWAIT CONFIG_NR_CPUS \
                    CONFIG_RISCV_M_MODE CONFIG_MMU CONFIG_FPU \
