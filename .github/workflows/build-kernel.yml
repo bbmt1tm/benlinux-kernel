@@ -151,13 +151,41 @@ jobs:
         fi
 
         # ==================================================
-        # PATCH 5: Boot breadcrumbs — DISABLED
+        # PATCH 5: C-code breadcrumbs in start_kernel (safe — sp always valid)
         # ==================================================
-        # Breadcrumbs in head.S call ROM UART which needs stack.
-        # Between reset_regs (sp=0) and la sp, init_thread_union,
-        # ROM calls fault → kernel derailed. Disabled until we
-        # implement a stackless breadcrumb approach.
-        echo "=== Boot breadcrumbs: DISABLED (ROM needs stack, sp=0 crashes) ==="
+        # head.S breadcrumbs are DISABLED (ROM needs stack, sp=0 crashes).
+        # But init/main.c breadcrumbs are SAFE — C code always has valid sp.
+        echo "=== Adding C-code breadcrumbs in start_kernel ==="
+        MAIN_C="${LINUX_DIR}/init/main.c"
+        cat > /tmp/add_c_breadcrumbs.py << 'CRUMB_EOF'
+        import sys
+        with open(sys.argv[1], 'r') as f:
+            content = f.read()
+        rom = '((int(*)(unsigned char))0x4FC00054)'
+        patches = 0
+        # K = start_kernel entry
+        if '\tchar *command_line;' in content:
+            content = content.replace(
+                '\tchar *command_line;',
+                '\t' + rom + '(0x4B); /* K=start_kernel */\n\tchar *command_line;', 1)
+            patches += 1
+        # I = past local_irq_disable
+        if '\tlocal_irq_disable();\n' in content:
+            content = content.replace(
+                '\tlocal_irq_disable();\n',
+                '\tlocal_irq_disable();\n\t' + rom + '(0x49); /* I=irq_disable */\n', 1)
+            patches += 1
+        # L = before local_irq_enable, E = after local_irq_enable (one replacement)
+        if '\tlocal_irq_enable();' in content:
+            content = content.replace(
+                '\tlocal_irq_enable();',
+                '\t' + rom + '(0x4C); /* L=before irq_enable */\n\tlocal_irq_enable();\n\t' + rom + '(0x45); /* E=after irq_enable */\n', 1)
+            patches += 2
+        with open(sys.argv[1], 'w') as f:
+            f.write(content)
+        print(f'OK: init/main.c C-breadcrumbs: {patches} patches applied')
+        CRUMB_EOF
+        python3 /tmp/add_c_breadcrumbs.py "$MAIN_C"
 
         # ==================================================
         # PATCH 6: head.S — CLIC mtvec.MODE=3
