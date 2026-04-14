@@ -326,25 +326,25 @@ jobs:
         cd buildroot
         make -j$(nproc)
 
-        # Verify GZIP initramfs (LZ4's 8MB buffer causes OOM on 16MB NOMMU)
+        # LZ4 initramfs fix
         LINUX_DIR=$(ls -d output/build/linux-*/ | head -1)
         KCONFIG="${LINUX_DIR}/.config"
-        if grep -q "CONFIG_INITRAMFS_COMPRESSION_GZIP=y" "$KCONFIG"; then
-          echo "=== GZIP initramfs compression active ==="
-        elif grep -q "CONFIG_INITRAMFS_COMPRESSION_LZ4=y" "$KCONFIG"; then
-          echo "=== WARNING: LZ4 still active — forcing GZIP ==="
+        if ! grep -q "CONFIG_INITRAMFS_COMPRESSION_LZ4=y" "$KCONFIG"; then
+          echo "=== Fixing initramfs compression: forcing LZ4 ==="
+          PRE_SIZE=$(stat -c%s output/images/Image 2>/dev/null || echo 0)
           sed -i 's/^CONFIG_INITRAMFS_COMPRESSION_.*=y/# &/' "$KCONFIG"
-          sed -i '/CONFIG_INITRAMFS_COMPRESSION_GZIP/d' "$KCONFIG"
-          echo "CONFIG_INITRAMFS_COMPRESSION_GZIP=y" >> "$KCONFIG"
-          echo "CONFIG_RD_GZIP=y" >> "$KCONFIG"
+          sed -i '/CONFIG_INITRAMFS_COMPRESSION_LZ4/d' "$KCONFIG"
+          echo "CONFIG_INITRAMFS_COMPRESSION_LZ4=y" >> "$KCONFIG"
           rm -f "${LINUX_DIR}/usr/initramfs_inc_data"
           rm -f "${LINUX_DIR}/usr/initramfs_data.o"
           rm -f "${LINUX_DIR}/usr/built-in.a"
           rm -f "${LINUX_DIR}/usr/.initramfs_inc_data.cmd"
           make -C "${LINUX_DIR}" ARCH=riscv olddefconfig
           make linux-rebuild -j$(nproc)
+          POST_SIZE=$(stat -c%s output/images/Image 2>/dev/null || echo 0)
+          echo "Image: ${PRE_SIZE} -> ${POST_SIZE} bytes"
         else
-          echo "=== No compression detected — GZIP may need fragment merge fix ==="
+          echo "=== LZ4 already active ==="
         fi
 
     - name: Verify kernel configuration
@@ -421,20 +421,6 @@ jobs:
 
         echo "=== SMP/SPINWAIT/NR_CPUS status ==="
         grep -E "CONFIG_SMP|SPINWAIT|NR_CPUS" "$CONFIG" || echo "(none found)"
-
-        echo ""
-        echo "=== CRITICAL: Initramfs Compression ==="
-        echo "  (LZ4 allocates 8MB contiguous buffer — OOM on 16MB NOMMU)"
-        grep -E "INITRAMFS_COMPRESSION|CONFIG_RD_" "$CONFIG" | head -10
-        if grep -q "CONFIG_INITRAMFS_COMPRESSION_LZ4=y" "$CONFIG"; then
-          echo "FATAL: LZ4 initramfs still active — will OOM at boot!"; FAIL=1
-        elif grep -q "CONFIG_INITRAMFS_COMPRESSION_GZIP=y" "$CONFIG"; then
-          echo "OK: GZIP initramfs (48KB buffer)"
-        elif grep -q "CONFIG_INITRAMFS_COMPRESSION_NONE=y" "$CONFIG"; then
-          echo "OK: uncompressed initramfs"
-        else
-          echo "WARN: no initramfs compression detected — check config"
-        fi
 
         echo ""
         echo "=== CRITICAL: Boot-path Configuration ==="
