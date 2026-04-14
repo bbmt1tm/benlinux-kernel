@@ -292,6 +292,11 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 	pr_info("esp32p4-timer: fully registered (clocksource=%u MHz, events=%u MHz, IRQ %d)\n",
 		freq / 1000000, SYSTIMER_FREQ_HZ / 1000000, irq);
 
+	/* Restore cliccfg — kernel boot wild-writes corrupt 0x20800000
+	 * (GZIP build layout shift causes a kernel pointer to land there).
+	 * Must restore before local_irq_enable or CLIC won't deliver. */
+	*(volatile u32 *)0x20800000 = 0x00000007;
+
 	/* Diagnostic: CLIC24 state from kernel context */
 	{
 		u32 mtvec_val;
