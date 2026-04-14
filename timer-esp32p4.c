@@ -238,7 +238,7 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 	}
 
 	pr_info("esp32p4-timer: enabling percpu IRQ %d\n", irq);
-	enable_percpu_irq(irq, irq_get_trigger_type(irq));
+	enable_percpu_irq(irq, IRQ_TYPE_NONE);
 
 	pr_info("esp32p4-timer: fully registered (%u MHz, IRQ %d)\n",
 		freq / 1000000, irq);
