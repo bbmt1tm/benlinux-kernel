@@ -171,8 +171,9 @@ static irqreturn_t esp32p4_timer_interrupt(int irq, void *dev_id)
 {
 	struct clock_event_device *ce = this_cpu_ptr(&esp32p4_ce);
 
-	/* Clear systimer INT_ST — with level-triggered CLIC24,
-	 * this drops IP to 0, preventing re-entry on mret. */
+	/* Clear systimer INT_ST (must clear source before mret
+	 * since CLIC24 is edge-triggered — the clear+re-arm in
+	 * set_next_event creates the next rising edge) */
 	st_write(ST_INT_CLR, ST_INT_TARGET1);
 
 	/* Disable alarm until next event is programmed.
