@@ -71,6 +71,12 @@ static inline u32 st_read(u32 addr)
 	return *(volatile u32 *)addr;
 }
 
+/* CONF base value with TARGET1_EN=0 (from boot logs: 0xFFC00002).
+ * Hardcoded to avoid st_read(ST_CONF) which returns cached stale data
+ * on P4 GZIP builds due to PMA entries locked without non-cacheable.
+ * Only bit 23 (TARGET1_EN) is toggled by this driver. */
+#define ST_CONF_BASE	0xFFC00002
+
 /* Per-CPU clock event device — must use DEFINE_PER_CPU to match
  * riscv-intc's irq_set_percpu_devid() marking. */
 static DEFINE_PER_CPU(struct clock_event_device, esp32p4_ce);
@@ -120,11 +126,8 @@ static struct clocksource esp32p4_cs = {
 static int esp32p4_set_next_event(unsigned long delta,
 				  struct clock_event_device *ce)
 {
-	u32 conf;
-
-	/* Disable alarm (clear TARGET1_EN, resets internal latch) */
-	conf = st_read(ST_CONF);
-	st_write(ST_CONF, conf & ~ST_CONF_TARGET1_EN);
+	/* Disable alarm (no st_read — avoids cached stale value) */
+	st_write(ST_CONF, ST_CONF_BASE);
 
 	/* Read current systimer counter */
 	st_write(ST_UNIT0_OP, ST_UNIT0_UPDATE);
@@ -145,16 +148,15 @@ static int esp32p4_set_next_event(unsigned long delta,
 	/* Clear any stale INT_ST before re-enabling */
 	st_write(ST_INT_CLR, ST_INT_TARGET1);
 
-	/* Re-enable alarm (0→1 transition restarts comparison) */
-	st_write(ST_CONF, conf | ST_CONF_TARGET1_EN);
+	/* Re-enable alarm */
+	st_write(ST_CONF, ST_CONF_BASE | ST_CONF_TARGET1_EN);
 
 	return 0;
 }
 
 static int esp32p4_timer_shutdown(struct clock_event_device *ce)
 {
-	u32 conf = st_read(ST_CONF);
-	st_write(ST_CONF, conf & ~ST_CONF_TARGET1_EN);
+	st_write(ST_CONF, ST_CONF_BASE);  /* disable alarm, no st_read */
 	st_write(ST_INT_CLR, ST_INT_TARGET1);
 	return 0;
 }
@@ -171,22 +173,12 @@ static irqreturn_t esp32p4_timer_interrupt(int irq, void *dev_id)
 {
 	struct clock_event_device *ce = this_cpu_ptr(&esp32p4_ce);
 
-	/* Clear systimer INT_ST (must clear source before mret
-	 * since CLIC24 is edge-triggered — the clear+re-arm in
-	 * set_next_event creates the next rising edge) */
+	/* Clear systimer INT_ST — with level-triggered CLIC24,
+	 * this drops IP to 0, preventing re-entry on mret. */
 	st_write(ST_INT_CLR, ST_INT_TARGET1);
 
-	/* Restore CLIC config if corrupted — GZIP kernel build
-	 * corrupts cliccfg at 0x20800000 (reads 0x48xxxxxx instead
-	 * of 0x00000007). Without this, CLIC stops delivering. */
-	*(volatile u32 *)0x20800000 = 0x00000007;
-
-	/* Disable alarm until next event is programmed.
-	 * set_next_event will re-enable it. */
-	{
-		u32 conf = st_read(ST_CONF);
-		st_write(ST_CONF, conf & ~ST_CONF_TARGET1_EN);
-	}
+	/* Disable alarm (no st_read — avoids cached stale value) */
+	st_write(ST_CONF, ST_CONF_BASE);
 
 	ce->event_handler(ce);
 	return IRQ_HANDLED;
@@ -219,18 +211,12 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 	/* Ensure alarm 1 configured: one-shot, counter 0 */
 	st_write(ST_TARGET1_CONF, 0);  /* unit_sel=0, period_mode=0 */
 
-	/* Disable alarm initially */
-	{
-		u32 conf = st_read(ST_CONF);
-		st_write(ST_CONF, conf & ~ST_CONF_TARGET1_EN);
-	}
+	/* Disable alarm initially (no st_read — avoids cached value) */
+	st_write(ST_CONF, ST_CONF_BASE);
 	st_write(ST_INT_CLR, ST_INT_TARGET1);
 
 	/* Ensure alarm 1 interrupt is enabled in systimer */
-	{
-		u32 int_ena = st_read(ST_INT_ENA);
-		st_write(ST_INT_ENA, int_ena | ST_INT_TARGET1);
-	}
+	st_write(ST_INT_ENA, ST_INT_TARGET1);
 	pr_info("esp32p4-timer: systimer alarm 1 configured (one-shot)\n");
 
 	/* Register clocksource at CPU frequency (360 MHz) */
