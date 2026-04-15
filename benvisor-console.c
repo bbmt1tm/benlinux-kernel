@@ -276,6 +276,13 @@ static int __init benvisor_tty_init(void)
 
 	register_console(&benvisor_tty_console);
 
+	/* Unregister the phase 1 boot console now that the tty console
+	 * has taken over. Both use benvisor_console_write → ROM UART + IPC,
+	 * so having both registered causes every printk line to appear twice.
+	 * The earlycon (CON_BOOT) was already auto-unregistered when the
+	 * boot console registered in console_initcall. */
+	unregister_console(&benvisor_boot_console);
+
 	pr_info("benvisor-console: ttyBV0 registered\n");
 	return 0;
 }
