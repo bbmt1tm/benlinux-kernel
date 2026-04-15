@@ -312,40 +312,26 @@ static void benvisor_console_write(struct console *co, const char *s,
 	}
 }
 
-static int benvisor_console_setup(struct console *co, char *options)
-{
-	return 0;
-}
-
-static struct uart_driver benvisor_uart_driver = {
-	.owner        = THIS_MODULE,
-	.driver_name  = "benvisor",
-	.dev_name     = BENVISOR_DRIVER_NAME,
-	.major        = BENVISOR_MAJOR,
-	.minor        = BENVISOR_MINOR,
-	.nr           = 1,
-	.cons         = NULL,  /* Set below after declaration */
-};
-
-static struct console benvisor_console = {
-	.name    = BENVISOR_DRIVER_NAME,
-	.write   = benvisor_console_write,
-	.device  = uart_console_device,
-	.setup   = benvisor_console_setup,
-	.flags   = CON_PRINTBUFFER,
-	.index   = 0,
-	.data    = &benvisor_uart_driver,
-};
-
 /* ========================================
- * Init — register UART driver + port
+ * Phase 1 init — console_initcall
+ *
+ * Just register a basic printk console (same as old driver).
+ * uart_register_driver() is too heavy for console_initcall —
+ * it allocates TTY structures that need slab/subsystems not
+ * yet initialized. That goes in phase 2.
  * ======================================== */
 
-static int __init benvisor_console_init(void)
+static struct console benvisor_boot_console = {
+	.name    = "benvisor",
+	.write   = benvisor_console_write,
+	.flags   = CON_PRINTBUFFER,
+	.index   = -1,
+};
+
+static int __init benvisor_early_console_init(void)
 {
 	struct device_node *np;
 	u32 reg[2];
-	int ret;
 
 	np = of_find_compatible_node(NULL, NULL, "benos,benvisor-console");
 	if (!np)
@@ -357,7 +343,7 @@ static int __init benvisor_console_init(void)
 	}
 	of_node_put(np);
 
-	/* NOMMU: physical == virtual, no ioremap needed */
+	/* NOMMU: physical == virtual */
 	ipc_base = (void __iomem *)(uintptr_t)reg[0];
 
 	/* Pick up ROM function if earlycon didn't set it */
@@ -367,8 +353,57 @@ static int __init benvisor_console_init(void)
 			rom_putc_fn = (rom_putc_fn_t)(uintptr_t)putc_addr;
 	}
 
-	/* Set console on the UART driver */
-	benvisor_uart_driver.cons = &benvisor_console;
+	register_console(&benvisor_boot_console);
+	pr_info("benvisor-console: registered at 0x%08x (rom_putc=%p)\n",
+		reg[0], rom_putc_fn);
+	return 0;
+}
+console_initcall(benvisor_early_console_init);
+
+static int benvisor_console_setup(struct console *co, char *options)
+{
+	return 0;
+}
+
+/* ========================================
+ * Phase 2 init — device_initcall
+ *
+ * Register the UART driver, port, and TTY console.
+ * This provides /dev/ttyBV0 for userspace stdin/stdout.
+ * Runs after slab, TTY subsystem, and timers are ready.
+ * ======================================== */
+
+static struct uart_driver benvisor_uart_driver = {
+	.owner        = THIS_MODULE,
+	.driver_name  = "benvisor",
+	.dev_name     = BENVISOR_DRIVER_NAME,
+	.major        = BENVISOR_MAJOR,
+	.minor        = BENVISOR_MINOR,
+	.nr           = 1,
+	.cons         = NULL,  /* Set below */
+};
+
+static struct console benvisor_uart_console = {
+	.name    = BENVISOR_DRIVER_NAME,
+	.write   = benvisor_console_write,
+	.device  = uart_console_device,
+	.setup   = benvisor_console_setup,
+	.flags   = CON_PRINTBUFFER,
+	.index   = 0,
+	.data    = &benvisor_uart_driver,
+};
+
+static int __init benvisor_uart_init(void)
+{
+	int ret;
+
+	if (!ipc_base) {
+		pr_err("benvisor: ipc_base not set (early init failed?)\n");
+		return -ENODEV;
+	}
+
+	/* Attach console to UART driver */
+	benvisor_uart_driver.cons = &benvisor_uart_console;
 
 	/* Register UART driver */
 	ret = uart_register_driver(&benvisor_uart_driver);
@@ -381,7 +416,7 @@ static int __init benvisor_console_init(void)
 	memset(&benvisor_port, 0, sizeof(benvisor_port));
 	benvisor_port.type     = PORT_UNKNOWN;
 	benvisor_port.iotype   = UPIO_MEM;
-	benvisor_port.mapbase  = reg[0];
+	benvisor_port.mapbase  = (resource_size_t)(uintptr_t)ipc_base;
 	benvisor_port.membase  = ipc_base;
 	benvisor_port.irq      = 0;  /* Polled */
 	benvisor_port.uartclk  = 115200 * 16;
@@ -402,12 +437,11 @@ static int __init benvisor_console_init(void)
 		return ret;
 	}
 
-	/* Register as a console */
-	register_console(&benvisor_console);
+	/* Unregister boot console, register UART console */
+	unregister_console(&benvisor_boot_console);
+	register_console(&benvisor_uart_console);
 
-	pr_info("benvisor-console: registered ttyBV0 at 0x%08x (rom_putc=%p)\n",
-		reg[0], rom_putc_fn);
-
+	pr_info("benvisor-console: ttyBV0 UART port registered\n");
 	return 0;
 }
-console_initcall(benvisor_console_init);
+device_initcall(benvisor_uart_init);
