@@ -179,17 +179,9 @@ static void benvisor_uart_stop_tx(struct uart_port *port)
 
 static void benvisor_uart_start_tx(struct uart_port *port)
 {
-	struct circ_buf *xmit = &port->state->xmit;
+	unsigned char ch;
 
-	while (!uart_circ_empty(xmit)) {
-		unsigned char ch = xmit->buf[xmit->tail];
-
-		benvisor_putchar(ch);
-		uart_xmit_advance(port, 1);
-	}
-
-	if (uart_circ_empty(xmit))
-		uart_write_wakeup(port);
+	uart_port_tx(port, ch, true, benvisor_putchar(ch));
 }
 
 static void benvisor_uart_stop_rx(struct uart_port *port)
