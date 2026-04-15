@@ -215,8 +215,11 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 	st_write(ST_CONF, ST_CONF_BASE);
 	st_write(ST_INT_CLR, ST_INT_TARGET1);
 
-	/* Ensure alarm 1 interrupt is enabled in systimer */
-	st_write(ST_INT_ENA, ST_INT_TARGET1);
+	/* Enable alarm 1 interrupt, preserving other enables.
+	 * ST_INT_ENA is a GLOBAL peripheral register — writing only alarm 1
+	 * disables alarm 0, which is Core 0's FreeRTOS tick timer on the host.
+	 * CLIC scrub on Core 1 already prevents alarm 0 from firing here. */
+	st_write(ST_INT_ENA, st_read(ST_INT_ENA) | ST_INT_TARGET1);
 	pr_info("esp32p4-timer: systimer alarm 1 configured (one-shot)\n");
 
 	/* Register clocksource at CPU frequency (360 MHz) */
