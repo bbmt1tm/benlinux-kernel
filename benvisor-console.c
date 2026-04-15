@@ -402,10 +402,7 @@ static int __init benvisor_uart_init(void)
 		return -ENODEV;
 	}
 
-	/* Attach console to UART driver */
-	benvisor_uart_driver.cons = &benvisor_uart_console;
-
-	/* Register UART driver */
+	/* Register UART driver WITHOUT console first */
 	ret = uart_register_driver(&benvisor_uart_driver);
 	if (ret) {
 		pr_err("benvisor: uart_register_driver failed: %d\n", ret);
@@ -429,7 +426,7 @@ static int __init benvisor_uart_init(void)
 	/* Set up RX polling timer */
 	timer_setup(&rx_timer, benvisor_rx_poll, 0);
 
-	/* Add the port */
+	/* Add the port BEFORE registering console */
 	ret = uart_add_one_port(&benvisor_uart_driver, &benvisor_port);
 	if (ret) {
 		pr_err("benvisor: uart_add_one_port failed: %d\n", ret);
@@ -437,8 +434,8 @@ static int __init benvisor_uart_init(void)
 		return ret;
 	}
 
-	/* Unregister boot console, register UART console */
-	unregister_console(&benvisor_boot_console);
+	/* NOW attach console — port is ready */
+	benvisor_uart_driver.cons = &benvisor_uart_console;
 	register_console(&benvisor_uart_console);
 
 	pr_info("benvisor-console: ttyBV0 UART port registered\n");
