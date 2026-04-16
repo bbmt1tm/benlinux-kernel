@@ -165,12 +165,18 @@ console_initcall(benvisor_early_console_init);
 
 static int benvisor_tty_open(struct tty_struct *tty, struct file *filp)
 {
-	mod_timer(&rx_timer, jiffies + RX_POLL_INTERVAL);
-	return 0;
+	return tty_port_open(&benvisor_tty_port, tty, filp);
 }
 
 static void benvisor_tty_close(struct tty_struct *tty, struct file *filp)
 {
+	tty_port_close(&benvisor_tty_port, tty, filp);
+}
+
+static int benvisor_tty_install(struct tty_driver *driver,
+				struct tty_struct *tty)
+{
+	return tty_port_install(&benvisor_tty_port, driver, tty);
 }
 
 static ssize_t benvisor_tty_write(struct tty_struct *tty,
@@ -188,10 +194,28 @@ static unsigned int benvisor_tty_write_room(struct tty_struct *tty)
 }
 
 static const struct tty_operations benvisor_tty_ops = {
+	.install    = benvisor_tty_install,
 	.open       = benvisor_tty_open,
 	.close      = benvisor_tty_close,
 	.write      = benvisor_tty_write,
 	.write_room = benvisor_tty_write_room,
+};
+
+static int benvisor_port_activate(struct tty_port *port,
+				  struct tty_struct *tty)
+{
+	mod_timer(&rx_timer, jiffies + RX_POLL_INTERVAL);
+	return 0;
+}
+
+static void benvisor_port_shutdown(struct tty_port *port)
+{
+	del_timer_sync(&rx_timer);
+}
+
+static const struct tty_port_operations benvisor_port_ops = {
+	.activate = benvisor_port_activate,
+	.shutdown = benvisor_port_shutdown,
 };
 
 static void benvisor_rx_poll(struct timer_list *t)
@@ -263,6 +287,7 @@ static int __init benvisor_tty_init(void)
 	tty_set_operations(benvisor_tty_driver, &benvisor_tty_ops);
 
 	tty_port_init(&benvisor_tty_port);
+	benvisor_tty_port.ops = &benvisor_port_ops;
 	tty_port_link_device(&benvisor_tty_port, benvisor_tty_driver, 0);
 
 	timer_setup(&rx_timer, benvisor_rx_poll, 0);
