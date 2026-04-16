@@ -204,6 +204,7 @@ static const struct tty_operations benvisor_tty_ops = {
 static int benvisor_port_activate(struct tty_port *port,
 				  struct tty_struct *tty)
 {
+	pr_info("benvisor-console: port activated (tty open)\n");
 	mod_timer(&rx_timer, jiffies + RX_POLL_INTERVAL);
 	return 0;
 }
@@ -222,12 +223,27 @@ static void benvisor_rx_poll(struct timer_list *t)
 {
 	u32 head, tail;
 	int count = 0;
+	struct tty_struct *tty;
 
 	if (!ipc_base)
 		goto resched;
 
 	head = readl_relaxed(ipc_base + RX_HEAD_OFF);
 	tail = readl_relaxed(ipc_base + RX_TAIL_OFF);
+
+	if (head == tail)
+		goto resched;
+
+	/* We need a tty_struct to deliver characters to the line discipline.
+	 * If /dev/console hasn't been opened yet, tty_port_tty_get returns NULL
+	 * and we must skip (characters stay in IPC ring buffer for next poll). */
+	tty = tty_port_tty_get(&benvisor_tty_port);
+	if (!tty) {
+		/* No tty attached — try to echo directly so we can see the issue */
+		pr_info_once("benvisor-rx: data available but no tty attached (head=%u tail=%u)\n",
+			     head, tail);
+		goto resched;
+	}
 
 	while (tail != head && count < 64) {
 		unsigned char ch = readb(ipc_base + RX_BUF_OFF + tail);
@@ -240,6 +256,8 @@ static void benvisor_rx_poll(struct timer_list *t)
 		writel_relaxed(tail, ipc_base + RX_TAIL_OFF);
 		tty_flip_buffer_push(&benvisor_tty_port);
 	}
+
+	tty_kref_put(tty);
 
 resched:
 	mod_timer(&rx_timer, jiffies + RX_POLL_INTERVAL);
@@ -307,6 +325,12 @@ static int __init benvisor_tty_init(void)
 	 * The earlycon (CON_BOOT) was already auto-unregistered when the
 	 * boot console registered in console_initcall. */
 	unregister_console(&benvisor_boot_console);
+
+	/* Start RX polling unconditionally. The kernel opens /dev/console
+	 * for PID 1's stdin before execing rdinit, but depending on the
+	 * open path (console redirect vs direct tty), our .activate may
+	 * not fire. Starting the timer here guarantees RX works. */
+	mod_timer(&rx_timer, jiffies + RX_POLL_INTERVAL);
 
 	pr_info("benvisor-console: ttyBV0 registered\n");
 	return 0;
