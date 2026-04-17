@@ -166,6 +166,11 @@ console_initcall(benvisor_early_console_init);
 static int benvisor_tty_open(struct tty_struct *tty, struct file *filp)
 {
 	mod_timer(&rx_timer, jiffies + RX_POLL_INTERVAL);
+	if (rom_putc_fn) {
+		rom_putc_fn('['); rom_putc_fn('O'); rom_putc_fn('P');
+		rom_putc_fn('E'); rom_putc_fn('N'); rom_putc_fn(']');
+		rom_putc_fn('\r'); rom_putc_fn('\n');
+	}
 	return 0;
 }
 
@@ -215,7 +220,14 @@ static void benvisor_rx_poll(struct timer_list *t)
 	if (count) {
 		writel_relaxed(tail, ipc_base + RX_TAIL_OFF);
 		tty_flip_buffer_push(&benvisor_tty_port);
-		pr_info("benvisor-rx: pushed %d chars to flip buffer\n", count);
+		/* Diagnostic via ROM UART directly — bypasses console layer
+		 * which may not be visible after boot console unregister */
+		if (rom_putc_fn) {
+			rom_putc_fn('['); rom_putc_fn('R'); rom_putc_fn('X');
+			rom_putc_fn(':'); rom_putc_fn('0' + count / 10);
+			rom_putc_fn('0' + count % 10); rom_putc_fn(']');
+			rom_putc_fn('\r'); rom_putc_fn('\n');
+		}
 	}
 
 resched:
