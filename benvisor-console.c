@@ -165,12 +165,14 @@ console_initcall(benvisor_early_console_init);
 
 static int benvisor_tty_open(struct tty_struct *tty, struct file *filp)
 {
+	tty_port_tty_set(&benvisor_tty_port, tty);
 	pr_info("benvisor-console: tty_open called\n");
 	return 0;
 }
 
 static void benvisor_tty_close(struct tty_struct *tty, struct file *filp)
 {
+	tty_port_tty_set(&benvisor_tty_port, NULL);
 }
 
 static ssize_t benvisor_tty_write(struct tty_struct *tty,
@@ -216,27 +218,12 @@ static void benvisor_rx_poll(struct timer_list *t)
 {
 	u32 head, tail;
 	int count = 0;
-	struct tty_struct *tty;
 
 	if (!ipc_base)
 		goto resched;
 
 	head = readl_relaxed(ipc_base + RX_HEAD_OFF);
 	tail = readl_relaxed(ipc_base + RX_TAIL_OFF);
-
-	if (head == tail)
-		goto resched;
-
-	/* We need a tty_struct to deliver characters to the line discipline.
-	 * If /dev/console hasn't been opened yet, tty_port_tty_get returns NULL
-	 * and we must skip (characters stay in IPC ring buffer for next poll). */
-	tty = tty_port_tty_get(&benvisor_tty_port);
-	if (!tty) {
-		/* No tty attached — try to echo directly so we can see the issue */
-		pr_info_once("benvisor-rx: data available but no tty attached (head=%u tail=%u)\n",
-			     head, tail);
-		goto resched;
-	}
 
 	while (tail != head && count < 64) {
 		unsigned char ch = readb(ipc_base + RX_BUF_OFF + tail);
@@ -249,8 +236,6 @@ static void benvisor_rx_poll(struct timer_list *t)
 		writel_relaxed(tail, ipc_base + RX_TAIL_OFF);
 		tty_flip_buffer_push(&benvisor_tty_port);
 	}
-
-	tty_kref_put(tty);
 
 resched:
 	mod_timer(&rx_timer, jiffies + RX_POLL_INTERVAL);
