@@ -215,6 +215,7 @@ static void benvisor_rx_poll(struct timer_list *t)
 	if (count) {
 		writel_relaxed(tail, ipc_base + RX_TAIL_OFF);
 		tty_flip_buffer_push(&benvisor_tty_port);
+		pr_info("benvisor-rx: pushed %d chars to flip buffer\n", count);
 	}
 
 resched:
