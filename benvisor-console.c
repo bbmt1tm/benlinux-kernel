@@ -165,14 +165,11 @@ console_initcall(benvisor_early_console_init);
 
 static int benvisor_tty_open(struct tty_struct *tty, struct file *filp)
 {
-	tty_port_tty_set(&benvisor_tty_port, tty);
-	pr_info("benvisor-console: tty_open called\n");
 	return 0;
 }
 
 static void benvisor_tty_close(struct tty_struct *tty, struct file *filp)
 {
-	tty_port_tty_set(&benvisor_tty_port, NULL);
 }
 
 static ssize_t benvisor_tty_write(struct tty_struct *tty,
@@ -194,24 +191,6 @@ static const struct tty_operations benvisor_tty_ops = {
 	.close      = benvisor_tty_close,
 	.write      = benvisor_tty_write,
 	.write_room = benvisor_tty_write_room,
-};
-
-static int benvisor_port_activate(struct tty_port *port,
-				  struct tty_struct *tty)
-{
-	pr_info("benvisor-console: port activated (tty open)\n");
-	mod_timer(&rx_timer, jiffies + RX_POLL_INTERVAL);
-	return 0;
-}
-
-static void benvisor_port_shutdown(struct tty_port *port)
-{
-	del_timer_sync(&rx_timer);
-}
-
-static const struct tty_port_operations benvisor_port_ops = {
-	.activate = benvisor_port_activate,
-	.shutdown = benvisor_port_shutdown,
 };
 
 static void benvisor_rx_poll(struct timer_list *t)
@@ -283,7 +262,6 @@ static int __init benvisor_tty_init(void)
 	tty_set_operations(benvisor_tty_driver, &benvisor_tty_ops);
 
 	tty_port_init(&benvisor_tty_port);
-	benvisor_tty_port.ops = &benvisor_port_ops;
 	tty_port_link_device(&benvisor_tty_port, benvisor_tty_driver, 0);
 
 	timer_setup(&rx_timer, benvisor_rx_poll, 0);
@@ -304,10 +282,10 @@ static int __init benvisor_tty_init(void)
 	 * boot console registered in console_initcall. */
 	unregister_console(&benvisor_boot_console);
 
-	/* Start RX polling unconditionally. The kernel opens /dev/console
-	 * for PID 1's stdin before execing rdinit, but depending on the
-	 * open path (console redirect vs direct tty), our .activate may
-	 * not fire. Starting the timer here guarantees RX works. */
+	/* Start RX polling unconditionally. The flip buffer API
+	 * (tty_insert_flip_char + tty_flip_buffer_push) works through
+	 * the tty_port directly — delivery uses port->itty which is
+	 * set automatically by tty_init_dev() when /dev/console opens. */
 	mod_timer(&rx_timer, jiffies + RX_POLL_INTERVAL);
 
 	pr_info("benvisor-console: ttyBV0 registered\n");
