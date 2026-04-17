@@ -165,6 +165,7 @@ console_initcall(benvisor_early_console_init);
 
 static int benvisor_tty_open(struct tty_struct *tty, struct file *filp)
 {
+	mod_timer(&rx_timer, jiffies + RX_POLL_INTERVAL);
 	return 0;
 }
 
@@ -281,12 +282,6 @@ static int __init benvisor_tty_init(void)
 	 * The earlycon (CON_BOOT) was already auto-unregistered when the
 	 * boot console registered in console_initcall. */
 	unregister_console(&benvisor_boot_console);
-
-	/* Start RX polling unconditionally. The flip buffer API
-	 * (tty_insert_flip_char + tty_flip_buffer_push) works through
-	 * the tty_port directly — delivery uses port->itty which is
-	 * set automatically by tty_init_dev() when /dev/console opens. */
-	mod_timer(&rx_timer, jiffies + RX_POLL_INTERVAL);
 
 	pr_info("benvisor-console: ttyBV0 registered\n");
 	return 0;
