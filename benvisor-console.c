@@ -165,18 +165,12 @@ console_initcall(benvisor_early_console_init);
 
 static int benvisor_tty_open(struct tty_struct *tty, struct file *filp)
 {
-	return tty_port_open(&benvisor_tty_port, tty, filp);
+	pr_info("benvisor-console: tty_open called\n");
+	return 0;
 }
 
 static void benvisor_tty_close(struct tty_struct *tty, struct file *filp)
 {
-	tty_port_close(&benvisor_tty_port, tty, filp);
-}
-
-static int benvisor_tty_install(struct tty_driver *driver,
-				struct tty_struct *tty)
-{
-	return tty_port_install(&benvisor_tty_port, driver, tty);
 }
 
 static ssize_t benvisor_tty_write(struct tty_struct *tty,
@@ -194,7 +188,6 @@ static unsigned int benvisor_tty_write_room(struct tty_struct *tty)
 }
 
 static const struct tty_operations benvisor_tty_ops = {
-	.install    = benvisor_tty_install,
 	.open       = benvisor_tty_open,
 	.close      = benvisor_tty_close,
 	.write      = benvisor_tty_write,
