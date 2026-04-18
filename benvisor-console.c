@@ -166,6 +166,11 @@ console_initcall(benvisor_early_console_init);
 static int benvisor_tty_open(struct tty_struct *tty, struct file *filp)
 {
 	mod_timer(&rx_timer, jiffies + RX_POLL_INTERVAL);
+	if (rom_putc_fn) {
+		rom_putc_fn('['); rom_putc_fn('O'); rom_putc_fn('P');
+		rom_putc_fn('E'); rom_putc_fn('N'); rom_putc_fn(']');
+		rom_putc_fn('\r'); rom_putc_fn('\n');
+	}
 	return 0;
 }
 
@@ -198,7 +203,7 @@ static void benvisor_rx_poll(struct timer_list *t)
 {
 	u32 head, tail;
 	int count = 0;
-	static u32 tick_count;
+	static int ticks;
 
 	if (!ipc_base)
 		goto resched;
@@ -206,10 +211,9 @@ static void benvisor_rx_poll(struct timer_list *t)
 	head = readl_relaxed(ipc_base + RX_HEAD_OFF);
 	tail = readl_relaxed(ipc_base + RX_TAIL_OFF);
 
-	/* Heartbeat every ~5s (500 ticks at 10ms): show raw head/tail */
-	tick_count++;
-	if (tick_count == 500 && rom_putc_fn) {
-		rom_putc_fn('['); rom_putc_fn('H'); rom_putc_fn('B');
+	/* ROM-direct heartbeat every ~5s: proves timer is firing */
+	if (++ticks >= 500 && rom_putc_fn) {
+		rom_putc_fn('['); rom_putc_fn('T');
 		rom_putc_fn(':'); rom_putc_fn('h'); rom_putc_fn('=');
 		rom_putc_fn("0123456789abcdef"[(head >> 4) & 0xf]);
 		rom_putc_fn("0123456789abcdef"[head & 0xf]);
@@ -218,7 +222,7 @@ static void benvisor_rx_poll(struct timer_list *t)
 		rom_putc_fn("0123456789abcdef"[tail & 0xf]);
 		rom_putc_fn(']');
 		rom_putc_fn('\r'); rom_putc_fn('\n');
-		tick_count = 0;
+		ticks = 0;
 	}
 
 	while (tail != head && count < 64) {
