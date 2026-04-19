@@ -203,27 +203,12 @@ static void benvisor_rx_poll(struct timer_list *t)
 {
 	u32 head, tail;
 	int count = 0;
-	static int ticks;
 
 	if (!ipc_base)
 		goto resched;
 
 	head = readl_relaxed(ipc_base + RX_HEAD_OFF);
 	tail = readl_relaxed(ipc_base + RX_TAIL_OFF);
-
-	/* ROM-direct heartbeat every ~5s: proves timer is firing */
-	if (++ticks >= 500 && rom_putc_fn) {
-		rom_putc_fn('['); rom_putc_fn('T');
-		rom_putc_fn(':'); rom_putc_fn('h'); rom_putc_fn('=');
-		rom_putc_fn("0123456789abcdef"[(head >> 4) & 0xf]);
-		rom_putc_fn("0123456789abcdef"[head & 0xf]);
-		rom_putc_fn(' '); rom_putc_fn('t'); rom_putc_fn('=');
-		rom_putc_fn("0123456789abcdef"[(tail >> 4) & 0xf]);
-		rom_putc_fn("0123456789abcdef"[tail & 0xf]);
-		rom_putc_fn(']');
-		rom_putc_fn('\r'); rom_putc_fn('\n');
-		ticks = 0;
-	}
 
 	while (tail != head && count < 64) {
 		unsigned char ch = readb(ipc_base + RX_BUF_OFF + tail);
@@ -235,6 +220,8 @@ static void benvisor_rx_poll(struct timer_list *t)
 	if (count) {
 		writel_relaxed(tail, ipc_base + RX_TAIL_OFF);
 		tty_flip_buffer_push(&benvisor_tty_port);
+		/* Diagnostic via ROM UART directly — bypasses console layer
+		 * which may not be visible after boot console unregister */
 		if (rom_putc_fn) {
 			rom_putc_fn('['); rom_putc_fn('R'); rom_putc_fn('X');
 			rom_putc_fn(':'); rom_putc_fn('0' + count / 10);
