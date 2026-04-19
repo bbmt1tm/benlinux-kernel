@@ -71,11 +71,17 @@ static inline u32 st_read(u32 addr)
 	return *(volatile u32 *)addr;
 }
 
-/* CONF base value with TARGET1_EN=0 (from boot logs: 0xFFC00002).
+/* CONF base value with all standard bits SET except TARGET1_EN (bit 23).
  * Hardcoded to avoid st_read(ST_CONF) which returns cached stale data
  * on P4 GZIP builds due to PMA entries locked without non-cacheable.
- * Only bit 23 (TARGET1_EN) is toggled by this driver. */
-#define ST_CONF_BASE	0xFFC00002
+ * Only bit 23 (TARGET1_EN) is toggled by this driver.
+ *
+ * BUG FIX: Was 0xFFC00002 which has bit 23 SET — shutdown never actually
+ * disabled alarm 1. After the clockevent framework shuts down the timer
+ * (setting event_handler to noop), the alarm fires with target in the past,
+ * ISR runs the noop handler, clears INT_ST, but alarm immediately re-fires
+ * (still enabled!), creating an infinite ISR livelock that traps Core 1. */
+#define ST_CONF_BASE	0xFF400002
 
 /* Per-CPU clock event device — must use DEFINE_PER_CPU to match
  * riscv-intc's irq_set_percpu_devid() marking. */
