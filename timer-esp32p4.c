@@ -257,8 +257,12 @@ static int __init esp32p4_timer_init_dt(struct device_node *np)
 		ce->rating		= 400;
 		ce->cpumask		= cpumask_of(0);
 		ce->set_next_event	= esp32p4_set_next_event;
-		ce->set_state_shutdown	= esp32p4_timer_shutdown;
-		ce->set_state_oneshot	= esp32p4_timer_shutdown;
+		/* TEST A: omit set_state_shutdown / set_state_oneshot.
+		 * timer-riscv.c does this too. The alarm is hardware-oneshot
+		 * already; set_next_event fully reprograms it. Having these
+		 * callbacks disable the alarm risks leaving it disarmed if
+		 * the framework ever transitions state without a matching
+		 * set_next_event follow-up. */
 	}
 
 	/* Skip calibrate_delay busy-loop */
