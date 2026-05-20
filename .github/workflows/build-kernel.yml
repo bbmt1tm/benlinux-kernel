@@ -395,13 +395,17 @@ jobs:
         # threshold poke — all set IP=1 but never deliver).
         #
         # Fix: run user processes in M-mode. Three changes:
-        #   (a) ENTRY: clear MPP in mstatus CSR during user trap save
-        #       so kernel sees MPP=0 (user) in pt_regs for correct logic
+        #   (a) ENTRY: clear MPP in saved s1 register after csrrc reads
+        #       mstatus, so pt_regs sees MPP=0 for correct kernel logic
         #   (b) EXIT: force MPP=3 in mstatus before mret so hardware
         #       returns to M-mode where CLIC delivers correctly
         #   (c) ECALL: route cause 11 (M-mode ecall) to syscall handler
         #       since user processes now ecall from M-mode
-        echo "=== Patching entry.S for M-mode userspace (PATCH 11) ==="
+        #
+        # v2 fix: 11a anchors on 'csrrc s1, CSR_STATUS' (unique in file,
+        # unconditional, in .Lsave_context). v1 anchored on TASK_TI_KERNEL_SP
+        # which mis-landed inside a dead #ifdef CONFIG_VMAP_STACK block.
+        echo "=== Patching entry.S for M-mode userspace (PATCH 11 v2) ==="
         cat > /tmp/patch_mmode_user.py << 'P11EOF'
         import sys
         with open(sys.argv[1], 'r') as f:
@@ -416,48 +420,46 @@ jobs:
         while i < len(lines):
             line = lines[i]
 
-            # ---- PART A: Entry path — clear MPP for user traps ----
-            # Find: the PT_SIZE_ON_STACK allocation in _save_context (user path).
-            # In riscv entry.S, _save_context does:
-            #   REG_S sp, TASK_TI_USER_SP(tp)
-            #   REG_L sp, TASK_TI_KERNEL_SP(tp)
-            #   addi sp, sp, -(PT_SIZE_ON_STACK)
-            # We insert AFTER this addi (sp now points to pt_regs frame).
-            # We save t0 to its pt_regs slot, clear MPP in mstatus CSR,
-            # then restore t0. The common save path then reads mstatus
-            # with MPP=0 and saves it as user context.
-            if ('TASK_TI_KERNEL_SP' in line and 'REG_L' in line
+            # ---- PART A: Entry path — clear MPP in saved status ----
+            # Anchor: 'csrrc s1, CSR_STATUS, t0' in .Lsave_context.
+            #   This is UNIQUE in entry.S (only one csrrc with s1 and
+            #   CSR_STATUS). It reads live mstatus into s1 (which later
+            #   becomes PT_STATUS in pt_regs). It is unconditional — not
+            #   inside any #ifdef block — so it's always compiled in.
+            #
+            # We insert AFTER it: clear MPP bits (0x1800) in s1 so the
+            # kernel sees MPP=0 (user) in pt_regs. t0 is free here (its
+            # SR_SUM|SR_FS_VS value was already consumed by the csrrc).
+            # We do NOT touch the live CSR — only the saved register.
+            if ('csrrc' in line and 's1' in line and 'CSR_STATUS' in line
                     and not entry_patched):
-                out.append(line)
-                # Next line should be the addi sp adjustment
-                i += 1
-                if i < len(lines):
-                    addi_line = lines[i]
-                    out.append(addi_line)
-                    indent = addi_line[:len(addi_line) - len(addi_line.lstrip())]
-                    out.append(indent + '/*\n')
-                    out.append(indent + ' * PATCH 11a: Clear MPP bits in mstatus CSR.\n')
-                    out.append(indent + ' * Process ran in M-mode (for CLIC delivery) but kernel\n')
-                    out.append(indent + ' * must see MPP=0 (U-mode) for correct signal/sched handling.\n')
-                    out.append(indent + ' * t0 is saved/restored via its pt_regs slot (PT_T0).\n')
-                    out.append(indent + ' */\n')
-                    out.append(indent + 'REG_S x5, PT_T0(sp)\n')
-                    out.append(indent + 'li x5, 0x1800\n')
-                    out.append(indent + 'csrc CSR_STATUS, x5\n')
-                    out.append(indent + 'REG_L x5, PT_T0(sp)\n')
-                    entry_patched = True
-                    print(f'OK: PATCH 11a — MPP clear inserted after line {i+1}')
+                out.append(line)  # emit the original csrrc
+                indent = line[:len(line) - len(line.lstrip())]
+                out.append(indent + '/*\n')
+                out.append(indent + ' * PATCH 11a: Clear MPP in saved status register.\n')
+                out.append(indent + ' * Process ran in M-mode (for CLIC delivery) but kernel\n')
+                out.append(indent + ' * must see MPP=0 (U-mode) for correct signal/sched/mscratch\n')
+                out.append(indent + ' * handling. We modify s1 (not the CSR) before it is stored\n')
+                out.append(indent + ' * to PT_STATUS. t0 is free (consumed by csrrc above).\n')
+                out.append(indent + ' */\n')
+                out.append(indent + 'li t0, 0x1800\n')
+                out.append(indent + 'not t0, t0\n')
+                out.append(indent + 'and s1, s1, t0\n')
+                entry_patched = True
+                print(f'OK: PATCH 11a — MPP clear in s1 inserted after csrrc (line {i+1})')
                 i += 1
                 continue
 
             # ---- PART B: Exit path — force MPP=3 before mret ----
-            # Find: csrw CSR_STATUS in ret_from_exception.
-            # Insert before it: force MPP bits to 3 (M-mode).
-            # The register being written is typically a0 or s0.
+            # Anchor: 'csrw CSR_STATUS' in ret_from_exception.
+            # There is exactly ONE csrw CSR_STATUS in entry.S (the exit
+            # path status restore). Insert before it: OR MPP bits into
+            # the register being written so mret enters M-mode.
             if ('csrw' in line and 'CSR_STATUS' in line
-                    and 'csrc' not in line and not exit_patched):
+                    and 'csrc' not in line and 'csrrc' not in line
+                    and not exit_patched):
                 indent = line[:len(line) - len(line.lstrip())]
-                # Detect which register is being written
+                # Detect which register is being written (typically a0 or s0)
                 parts = line.strip().split(',')
                 if len(parts) >= 2:
                     reg = parts[1].strip().split()[0] if parts[1].strip() else 'a0'
@@ -492,23 +494,29 @@ jobs:
 
         # Report
         if not entry_patched:
-            print('WARN: PATCH 11a (entry MPP clear) not applied — TASK_TI_KERNEL_SP not found')
+            print('FAIL: PATCH 11a not applied — csrrc s1, CSR_STATUS not found')
+            print('      Expected unique line: csrrc s1, CSR_STATUS, t0')
+            sys.exit(1)
         if not exit_patched:
-            print('WARN: PATCH 11b (exit MPP force) not applied — csrw CSR_STATUS not found')
+            print('FAIL: PATCH 11b not applied — csrw CSR_STATUS not found')
+            sys.exit(1)
         if not ecall_patched:
-            print('WARN: PATCH 11c (ecall table) not applied — do_trap_ecall_m not found')
+            print('FAIL: PATCH 11c not applied — do_trap_ecall_m not found')
+            sys.exit(1)
 
         with open(sys.argv[1], 'w') as f:
             f.writelines(out)
         P11EOF
         python3 /tmp/patch_mmode_user.py "$ENTRY_S"
-        echo "=== Verifying PATCH 11 ==="
-        echo "--- MPP clear (entry) ---"
-        grep -n "PATCH 11a\|csrc CSR_STATUS\|0x1800" "$ENTRY_S" | head -10
-        echo "--- MPP force (exit) ---"
+        echo "=== Verifying PATCH 11 v2 ==="
+        echo "--- 11a: MPP clear in s1 (entry) ---"
+        grep -n "PATCH 11a\|and s1.*t0\|not t0\|li t0.*0x1800" "$ENTRY_S" | head -10
+        echo "--- 11b: MPP force (exit) ---"
         grep -n "PATCH 11b\|or.*t0" "$ENTRY_S" | head -5
-        echo "--- ecall table ---"
+        echo "--- 11c: ecall table ---"
         grep -n "do_trap_ecall" "$ENTRY_S" | head -5
+        echo "--- Context around 11a (verify it's in .Lsave_context, not VMAP_STACK) ---"
+        grep -n -B3 "PATCH 11a" "$ENTRY_S" | head -8
 
         echo "=== All kernel modifications applied ==="
 
