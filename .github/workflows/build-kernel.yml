@@ -332,6 +332,60 @@ jobs:
         echo "=== Verifying mcause patch ==="
         grep -n -B2 -A2 "CSR_CAUSE" "$ENTRY_S" | head -20
 
+        # ==================================================
+        # PATCH 10: entry.S — user-return state probe (DIAGNOSTIC)
+        # ==================================================
+        # Captures the CSR/CLIC state at the trap return that crosses into
+        # the failing context (the first U-mode return at exec /bin/sh).
+        # Writes 4 words to the IPC probe scratch @0x8ff3c124 just before the
+        # GPR reload / mret:
+        #   [0]=mstatus (MPP[12:11]: 0=user return, 3=kernel)
+        #   [1]=mcause  (MPIL[23:16] = post-mret CLIC level)
+        #   [2]=CLIC24 ctrl @0x20801060 ([ip][ie][attr][ctl])
+        #   [3]=mintthresh @0x20800008
+        # Core 0 prints these; the last values latched before a freeze localize
+        # the mask. Inserted right after PATCH 9's "csrw CSR_CAUSE, a0"; t0/t1/t2
+        # are reloaded immediately below and sp still holds pt_regs, so this is
+        # safe to clobber. Remove this patch once the root cause is fixed.
+        echo "=== Patching entry.S for user-return probe (PATCH 10) ==="
+        cat > /tmp/patch_probe.py << 'PROBEEOF'
+        import sys
+        with open(sys.argv[1], 'r') as f:
+            lines = f.readlines()
+        patched = False
+        out = []
+        for line in lines:
+            out.append(line)
+            if 'csrw CSR_CAUSE' in line and not patched:
+                indent = line[:len(line) - len(line.lstrip())]
+                probe = [
+                    '/* PATCH 10: user-return state probe (diagnostic). */',
+                    '/* t0/t1/t2 reloaded just below; sp still = pt_regs. */',
+                    'li t2, 0x8ff3c124',
+                    'REG_L t0, PT_STATUS(sp)',
+                    'sw t0, 0(t2)',
+                    'REG_L t0, PT_CAUSE(sp)',
+                    'sw t0, 4(t2)',
+                    'li t1, 0x20801060',
+                    'lw t0, 0(t1)',
+                    'sw t0, 8(t2)',
+                    'li t1, 0x20800008',
+                    'lw t0, 0(t1)',
+                    'sw t0, 12(t2)',
+                ]
+                for p in probe:
+                    out.append(indent + p + '\n')
+                patched = True
+                print('OK: user-return probe inserted after csrw CSR_CAUSE')
+        if not patched:
+            print('WARN: csrw CSR_CAUSE not found - did PATCH 9 run?')
+        with open(sys.argv[1], 'w') as f:
+            f.writelines(out)
+        PROBEEOF
+        python3 /tmp/patch_probe.py "$ENTRY_S"
+        echo "=== Verifying user-return probe ==="
+        grep -n -A14 "csrw CSR_CAUSE" "$ENTRY_S" | head -20
+
         echo "=== All kernel modifications applied ==="
 
     - name: Build kernel and rootfs
