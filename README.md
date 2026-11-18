@@ -8,6 +8,7 @@ Native Linux on Core 1 of the ESP32-P4, hosted by the BenVisor M-mode shim, with
 | --- | --- | --- |
 | `.github/workflows/build-kernel.yml`, `benlinux_kernel.cfg`, `configs/`, `patches/`, `timer-esp32p4.c`, `benvisor-console.c` | Linux 6.12 NOMMU kernel + initramfs, built with Buildroot. Patches 1–11 are applied inline by the workflow. | `Build BenLinux Kernel` (push to `main`, ~20 min; firmware-only changes skip it) |
 | `firmware/benlinux-standalone/` | ESP-IDF v5.5.1 host firmware: Core 0 UART relay, BenVisor (`components/benvisor`), DTB, Core 1 Linux launch. `notes/` holds the May 2026 test and fix notes. | `Build BenLinux Firmware` (any change under `firmware/`) |
+| `firmware/benmmu-probe/` | Stage 0 BenMMU hardware probes (PMP, MPRV, cache-MMU, timings) run on Core 1. See its README for how to read the results. | `Build BenLinux Firmware` (matrix job) |
 
 ## Firmware build notes
 
