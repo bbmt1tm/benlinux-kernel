@@ -1,0 +1,20 @@
+idf_component_register(
+    SRCS
+        "main.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        benvisor
+        freertos
+        esp_psram
+        esp_system
+        hal
+        heap
+        log
+        esp_mm
+        vfs
+        fatfs
+        sdmmc
+        driver
+        soc
+)

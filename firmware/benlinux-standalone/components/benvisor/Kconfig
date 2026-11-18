@@ -1,0 +1,16 @@
+menu "BenVisor (Linux on Core 1)"
+
+    config BENVISOR_ENABLED
+        bool "Enable BenVisor Linux boot"
+        default y
+        help
+            Enable native Linux boot on ESP32-P4 Core 1.
+
+    config BENVISOR_KERNEL_PATH
+        string "Default kernel path on SD card"
+        default "/sd/Image"
+        depends on BENVISOR_ENABLED
+        help
+            Path to the kernel Image file on the SD card.
+
+endmenu

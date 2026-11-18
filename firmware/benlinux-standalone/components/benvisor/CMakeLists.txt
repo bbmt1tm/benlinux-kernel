@@ -1,0 +1,17 @@
+idf_component_register(
+    SRCS
+        "src/benvisor.c"
+        "src/benvisor_asm.S"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        freertos
+        esp_timer
+        esp_psram
+        esp_system
+        esp_rom
+        hal
+        heap
+        log
+        esp_mm
+)
