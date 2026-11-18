@@ -1,0 +1,60 @@
+# ============================================================
+# BenLinux Standalone — sdkconfig.defaults
+# ============================================================
+# These are the MINIMUM required settings. Run `idf.py set-target
+# esp32p4` first, then `idf.py build`. ESP-IDF merges these
+# defaults into the generated sdkconfig.
+#
+# IMPORTANT: Once you have a working sdkconfig, hand-tune only.
+# Never delete or regenerate it blindly.
+# ============================================================
+
+# === Target ===
+CONFIG_IDF_TARGET="esp32p4"
+
+# === CRITICAL: Disable hardware stack guard ===
+# Linux head.S zeros sp (li sp, 0) as part of reset_regs.
+# The hardware stack guard fires on sp=0, stalling the system.
+CONFIG_ESP_SYSTEM_HW_STACK_GUARD=n
+
+# === CRITICAL: Don't check Core 1 for interrupt WDT ===
+# Core 1 will be running Linux — FreeRTOS tick stops.
+CONFIG_ESP_INT_WDT_CHECK_CPU1=n
+
+# === CRITICAL: Enable PSRAM instruction fetch ===
+# Kernel executes from PSRAM via data bus. Without XIP,
+# Core 1 cannot fetch instructions from PSRAM.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+
+# === PSRAM heap ===
+# Let ESP-IDF manage PSRAM as heap. We allocate from it for Linux.
+CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
+
+# === Disable coredump (no crash handler needed on Linux chip) ===
+# CONFIG_ESP_COREDUMP_ENABLE is not set
+
+# === Console: UART0 at 115200 ===
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+
+# === SD Card (for kernel loading during development) ===
+CONFIG_SOC_SDMMC_HOST_SUPPORTED=y
+
+# === Dual core (needed for Core 1 task) ===
+CONFIG_FREERTOS_UNICORE=n
+
+# === Increase main task stack (kernel loading + setup) ===
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# === Watchdog: lenient during development ===
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+
+# === Partition table ===
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# === Flash: auto-detect ===
+CONFIG_ESPTOOLPY_FLASHSIZE_DETECT=y

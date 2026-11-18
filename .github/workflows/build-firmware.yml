@@ -1,0 +1,49 @@
+name: Build BenLinux Firmware
+
+# Builds the ESP-IDF host firmware (Core 0 relay + BenVisor) for ESP32-P4.
+# The Core 1 PMA patch (tools/apply_pma_patch.sh) is applied to the container's
+# IDF tree before building, so the artefacts match a patched local build.
+
+on:
+  push:
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/build-firmware.yml'
+  pull_request:
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/build-firmware.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Build benlinux-standalone (ESP-IDF v5.5.1, esp32p4)
+      uses: espressif/esp-idf-ci-action@v1
+      with:
+        esp_idf_version: v5.5.1
+        target: esp32p4
+        path: firmware/benlinux-standalone
+        command: bash tools/apply_pma_patch.sh "$IDF_PATH" && idf.py build
+
+    - name: Size report
+      run: |
+        ls -la firmware/benlinux-standalone/build/*.bin
+
+    - name: Upload firmware
+      uses: actions/upload-artifact@v4
+      with:
+        name: benlinux-standalone-firmware
+        path: |
+          firmware/benlinux-standalone/build/benlinux-standalone.bin
+          firmware/benlinux-standalone/build/benlinux-standalone.elf
+          firmware/benlinux-standalone/build/benlinux-standalone.map
+          firmware/benlinux-standalone/build/bootloader/bootloader.bin
+          firmware/benlinux-standalone/build/partition_table/partition-table.bin
+          firmware/benlinux-standalone/build/flash_args

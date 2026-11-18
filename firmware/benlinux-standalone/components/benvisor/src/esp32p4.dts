@@ -1,0 +1,63 @@
+/dts-v1/;
+
+/ {
+	#address-cells = <0x01>;
+	#size-cells = <0x01>;
+	compatible = "benos,esp32p4";
+	model = "BenLinux Standalone ESP32-P4";
+
+	chosen {
+		bootargs = "earlycon console=ttyBV0 lpj=3600000 root=/dev/ram0 nosoftlockup nohz=off rdinit=/bin/sh";
+		stdout-path = "/soc/console@cafebabe";
+	};
+
+	cpus {
+		#address-cells = <0x01>;
+		#size-cells = <0x00>;
+		timebase-frequency = <0x15752A00>;
+
+		cpu@1 {
+			device_type = "cpu";
+			reg = <0x01>;
+			compatible = "riscv";
+			riscv,isa = "rv32ima";
+			mmu-type = "riscv,none";
+
+			interrupt-controller {
+				#interrupt-cells = <0x01>;
+				interrupt-controller;
+				compatible = "riscv,cpu-intc";
+				phandle = <0x01>;
+			};
+		};
+	};
+
+	memory@48200000 {
+		device_type = "memory";
+		reg = <0x48200000 0x01A00000>;
+	};
+
+	soc {
+		#address-cells = <0x01>;
+		#size-cells = <0x01>;
+		compatible = "simple-bus";
+		ranges;
+
+		/* Systimer alarm 1 → CLIC index 24 (via interrupt matrix).
+		 * Kernel timer driver manages systimer directly. */
+		timer@500e2000 {
+			compatible = "benos,esp32p4-timer";
+			reg = <0x500E2000 0x100>;
+			interrupts-extended = <0x01 0x07>;
+			timebase-frequency = <0x15752A00>;
+		};
+
+		/* IPC ring buffer console.
+		 * reg address 0xCAFEBABE is a placeholder — patched at runtime
+		 * with the actual uncached SRAM address. */
+		console@cafebabe {
+			compatible = "benos,benvisor-console";
+			reg = <0xCAFEBABE 0x920>;
+		};
+	};
+};
