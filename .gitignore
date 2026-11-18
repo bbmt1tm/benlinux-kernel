@@ -1,0 +1,11 @@
+# ESP-IDF build output
+build/
+managed_components/
+dependencies.lock
+sdkconfig.old
+
+# Editor
+.vscode/
+
+# Local snapshot zips (git history replaces these)
+*.zip
