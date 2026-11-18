@@ -57,6 +57,26 @@ benvisor_diag_mstatus:
 benvisor_saved_mcause:
     .word   0
 
+    /* Bail breadcrumbs: a tick that fires while sp==0 takes the bail
+     * path. We count those and record the PC running with sp==0 so
+     * Core 0 can see them and identify the offending context. */
+    .global benvisor_bail_count
+benvisor_bail_count:
+    .word   0
+
+    .global benvisor_bail_mepc
+benvisor_bail_mepc:
+    .word   0
+
+    /* Private stack for the bail path. When sp==0 we cannot push to the
+     * kernel stack and mscratch is off limits, so we borrow this to get
+     * scratch registers, clear the alarm, and re-arm. 512 bytes is ample
+     * (the bail does not nest: it runs at CLIC level 7, the max). */
+    .balign 16
+benvisor_isr_bail_stack:
+    .space  512
+benvisor_isr_bail_stack_top:
+
     .global benvisor_saved_mtvec
 benvisor_saved_mtvec:
     .word   0
@@ -86,7 +106,15 @@ benvisor_saved_regs:
     .balign 64
     .global benvisor_mtvt_table
 benvisor_mtvt_table:
-    .rept 24
+    .rept 7
+    .word   benvisor_unexpected_isr
+    .endr
+    /* Entry 7: PoC HARDCODE — kernel _start_trap for the SD-card Image only
+     * (md5 873c397aa1fdcd1eb139cef15d10267e, _start_trap=0x484c78dc, verified).
+     * Breaks on any future kernel rebuild that shifts entry.S above _start_trap;
+     * replace with a DTB/IPC-carried address for the durable fix. */
+    .word   0x484c78dc                  /* Entry 7 → kernel _start_trap */
+    .rept 16
     .word   benvisor_unexpected_isr
     .endr
     .word   benvisor_timer_isr          /* Entry 24 */
@@ -112,7 +140,11 @@ benvisor_mtvt_table:
     .type   benvisor_timer_isr, @function
 
 benvisor_timer_isr:
-    /* Guard: if sp=0 (kernel's reset_regs zeroed it), bail immediately. */
+    /* Guard: if sp==0 the kernel context has no usable stack (e.g. first
+     * tick after mret into a NOMMU userspace whose sp is still 0). The old
+     * bail did a bare mret WITHOUT clearing INT_ST — but line 24 is
+     * level-triggered, so it re-fired instantly → infinite storm, hard hang.
+     * The bail path now clears the alarm + re-arms on a private stack. */
     beqz    sp, .Lisr_bail_fast
 
     /* Save ALL caller-saved registers (16 regs = 64 bytes) */
@@ -143,8 +175,6 @@ benvisor_timer_isr:
     lui     t0, %hi(0x500E206C)         /* SYSTIMER_INT_CLR */
     li      t1, 2                       /* bit 1 = Alarm 1 */
     sw      t1, %lo(0x500E206C)(t0)
-
-    /* ---- ISR counter ---- */
     la      t0, benvisor_isr_count
     lw      t1, 0(t0)
     addi    t1, t1, 1
@@ -164,19 +194,43 @@ benvisor_timer_isr:
     csrr    t1, mstatus
     sw      t1, 0(t0)
 
-    /* ---- mtimecmp check: inject CLIC int 7 if time >= mtimecmp ---- */
-    la      t0, benvisor_mtimecmp_ptr
-    lw      t0, 0(t0)
-    beqz    t0, .Ltimer_done
+    /* ---- Tick injection: inject CLIC line 7 when the systimer counter has
+     * reached the kernel's deadline (ST_TARGET1) ----
+     *
+     * The kernel timer driver writes its next deadline straight to the
+     * systimer TARGET1 registers (0x500E2024/28) and never updates the IPC
+     * mtimecmp (which is stuck at 0xFFFF...). It expects the alarm to deliver
+     * to its hwirq handler. So BenVisor compares the live 16 MHz systimer
+     * counter against TARGET1 — the SAME clock domain (NOT CSR time, which is
+     * 360 MHz) — and injects line 7 (now vectored → mtvt[7] → kernel) when due.
+     *
+     * Registers (16 MHz domain):
+     *   ST_UNIT0_OP   0x500E2004  write (1<<30) to latch counter
+     *   ST_UNIT0_VAL  0x500E2040(hi) 0x500E2044(lo)
+     *   ST_TARGET1    0x500E2024(hi) 0x500E2028(lo)
+     * Uses t0..t4 (all saved in the frame, restored before mret). */
 
-    lw      t1, 4(t0)                  /* mtimecmp_hi */
-    lw      t0, 0(t0)                  /* mtimecmp_lo */
+    /* latch current systimer counter */
+    lui     t0, %hi(0x500E2004)
+    lui     t1, 0x40000                 /* UNIT0_UPDATE = bit 30 */
+    sw      t1, %lo(0x500E2004)(t0)
 
-    csrr    t2, timeh
-    bltu    t2, t1, .Ltimer_done       /* time_hi < cmp_hi → not due */
-    bne     t2, t1, .Ltimer_inject     /* time_hi > cmp_hi → past due */
-    csrr    t2, time
-    bltu    t2, t0, .Ltimer_done       /* time_lo < cmp_lo → not due */
+    /* read counter (hi:lo) */
+    lui     t0, %hi(0x500E2040)
+    lw      t3, %lo(0x500E2040)(t0)     /* t3 = now_hi */
+    lui     t0, %hi(0x500E2044)
+    lw      t4, %lo(0x500E2044)(t0)     /* t4 = now_lo */
+
+    /* read kernel deadline TARGET1 (hi:lo) */
+    lui     t0, %hi(0x500E2024)
+    lw      t1, %lo(0x500E2024)(t0)     /* t1 = tgt_hi */
+    lui     t0, %hi(0x500E2028)
+    lw      t2, %lo(0x500E2028)(t0)     /* t2 = tgt_lo */
+
+    /* 64-bit compare: due if now >= target */
+    bltu    t3, t1, .Ltimer_done        /* now_hi < tgt_hi → not due */
+    bne     t3, t1, .Ltimer_inject      /* now_hi > tgt_hi → due */
+    bltu    t4, t2, .Ltimer_done        /* now_lo < tgt_lo → not due */
 
 .Ltimer_inject:
     lui     t0, %hi(0x2080101C)         /* CLIC int 7 ctrl reg */
@@ -279,6 +333,63 @@ benvisor_timer_isr:
     mret
 
 .Lisr_bail_fast:
+    /* sp == 0 here, so there is nothing on the kernel stack to preserve.
+     * Borrow the private bail stack to get three scratch registers, clear
+     * the alarm so it stops re-firing, re-arm it at the normal cadence, and
+     * leave a breadcrumb. Restore sp = 0 (we know it was 0) before mret. */
+    la      sp, benvisor_isr_bail_stack_top
+    addi    sp, sp, -16
+    sw      t0, 0(sp)
+    sw      t1, 4(sp)
+    sw      t2, 8(sp)
+
+    /* Clear systimer Alarm 1 INT_ST — this is what stops the storm. */
+    lui     t0, %hi(0x500E206C)            /* SYSTIMER_INT_CLR */
+    li      t1, 2                          /* bit 1 = Alarm 1 */
+    sw      t1, %lo(0x500E206C)(t0)
+
+    /* Breadcrumb: count bails + record the PC that was running with sp==0. */
+    la      t0, benvisor_bail_count
+    lw      t1, 0(t0)
+    addi    t1, t1, 1
+    sw      t1, 0(t0)
+    la      t0, benvisor_bail_mepc
+    csrr    t1, mepc
+    sw      t1, 0(t0)
+
+    /* Re-arm Alarm 1 = now + 1600 (same cadence as the normal path) so the
+     * heartbeat keeps coming even while the offending context persists. */
+    lui     t0, %hi(0x500E2000)            /* disable TARGET1_EN (bit 23) */
+    lw      t1, %lo(0x500E2000)(t0)
+    lui     t2, 0x00800
+    not     t2, t2
+    and     t1, t1, t2
+    sw      t1, %lo(0x500E2000)(t0)
+
+    lui     t0, %hi(0x500E2004)            /* latch current counter */
+    lui     t1, 0x40000                    /* bit 30 = UNIT0_UPDATE */
+    sw      t1, %lo(0x500E2004)(t0)
+    lui     t0, %hi(0x500E2044)
+    lw      t1, %lo(0x500E2044)(t0)
+
+    addi    t1, t1, 1600                   /* target = now + 1600 */
+    lui     t0, %hi(0x500E2028)
+    sw      t1, %lo(0x500E2028)(t0)
+
+    lui     t0, %hi(0x500E2054)            /* COMP1_LOAD */
+    li      t1, 1
+    sw      t1, %lo(0x500E2054)(t0)
+
+    lui     t0, %hi(0x500E2000)            /* re-enable TARGET1_EN (bit 23) */
+    lw      t1, %lo(0x500E2000)(t0)
+    lui     t2, 0x00800
+    or      t1, t1, t2
+    sw      t1, %lo(0x500E2000)(t0)
+
+    lw      t0, 0(sp)
+    lw      t1, 4(sp)
+    lw      t2, 8(sp)
+    li      sp, 0                          /* restore sp == 0 (known) */
     mret
 
     .size benvisor_timer_isr, . - benvisor_timer_isr

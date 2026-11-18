@@ -48,7 +48,7 @@
 		timer@500e2000 {
 			compatible = "benos,esp32p4-timer";
 			reg = <0x500E2000 0x100>;
-			interrupts-extended = <0x01 0x18>;
+			interrupts-extended = <0x01 0x07>;
 			timebase-frequency = <0x15752A00>;
 		};
 

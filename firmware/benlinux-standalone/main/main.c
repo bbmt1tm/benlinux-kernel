@@ -59,6 +59,27 @@ static void IRAM_ATTR core1_linux_task(void *arg);
 static void IRAM_ATTR uart_relay_loop(benvisor_ipc_t *ipc);
 
 /* ========================================
+ * BenVisor BSS globals (defined in benvisor_asm.S)
+ *
+ * Core 0 reads these via the uncached SRAM alias so we
+ * see what Core 1 actually wrote, not stale L1.
+ * ======================================== */
+
+extern uint32_t benvisor_isr_count;
+extern uint32_t benvisor_last_mepc;
+extern uint32_t benvisor_diag_mtvec;
+extern uint32_t benvisor_diag_mstatus;
+extern uint32_t benvisor_saved_mcause;
+extern uint32_t benvisor_heartbeat_ctr;
+extern uint32_t benvisor_bail_count;   /* ticks that hit the sp==0 bail path */
+extern uint32_t benvisor_bail_mepc;    /* PC running with sp==0 at last bail */
+
+static inline uint32_t read_bv_nc(const uint32_t *cached_addr)
+{
+    return *(volatile uint32_t *)((uintptr_t)cached_addr + SOC_NON_CACHEABLE_OFFSET);
+}
+
+/* ========================================
  * Core 1 Boot Arguments
  * ======================================== */
 
@@ -539,11 +560,29 @@ static void IRAM_ATTR uart_relay_loop(benvisor_ipc_t *ipc)
      * - RX writes (host→Linux): use uncached alias for cross-core visibility */
     benvisor_ipc_t *ipc_nc = (benvisor_ipc_t *)((uintptr_t)ipc + SOC_NON_CACHEABLE_OFFSET);
 
+    /* ---- HEALTH state ----
+     * Polling cadence is determined empirically: with 500000 outer iterations
+     * and the busy work in this loop, HEALTH lands at ~5 Hz on a clean chip.
+     * That's fast enough to catch a freeze transition within ~200 ms. */
     uint32_t tick = 0;
-    uint32_t last_alarm_target = 0;
 
-    ESP_LOGI(TAG, "Core 0 entering UART relay loop");
+    /* Per-poll deltas */
+    uint32_t last_alarm_target = 0;
+    uint32_t last_tx_head      = 0;
+    uint32_t last_isr_count    = 0;
+    uint32_t last_hb_ctr       = 0;
+    uint32_t last_bail_count   = 0;
+
+    /* Freeze tracking */
+    uint32_t stuck_polls      = 0;     /* polls where (STA && INT_ST&2 && isr_delta==0) */
+    bool     freeze_announced = false;
+    uint32_t inject_cooldown  = 0;     /* tick countdown between RX pokes */
+
+    ESP_LOGI(TAG, "Core 0 entering UART relay loop (HEALTH-V2)");
     ESP_LOGI(TAG, "  IPC: %p (uncached: %p)", ipc, ipc_nc);
+    ESP_LOGI(TAG, "  &isr_count cached=%p uncached=0x%08lx",
+             &benvisor_isr_count,
+             (unsigned long)((uintptr_t)&benvisor_isr_count + SOC_NON_CACHEABLE_OFFSET));
     ESP_LOGI(TAG, "  Type characters to send to Linux, output appears here");
     ESP_LOGI(TAG, "---");
 
@@ -566,31 +605,188 @@ static void IRAM_ATTR uart_relay_loop(benvisor_ipc_t *ipc)
         {
             uint8_t ch;
             if (esp_rom_uart_rx_one_char(&ch) == 0) {
-                /* Got a character — write to IPC RX ring buffer via uncached alias */
                 uint32_t rx_head = ipc_nc->rx_head;
                 uint32_t rx_next = (rx_head + 1) & IPC_RX_BUF_MASK;
                 if (rx_next != ipc_nc->rx_tail) {
-                    /* Cast away volatile for array access, then write via volatile */
                     ((volatile char *)ipc_nc->rx_buf)[rx_head] = (char)ch;
                     ipc_nc->rx_head = rx_next;
                 }
             }
         }
 
-        /* ---- Heartbeat: monitor kernel health every ~5s ---- */
+        /* ---- HEALTH dump ---- */
         if (++tick >= 500000) {
             tick = 0;
+
+            /* --- Systimer state (Core 0 can read these directly) --- */
             uint32_t alarm_target = *(volatile uint32_t *)0x500E2028;
-            uint32_t int_st = *(volatile uint32_t *)0x500E2070;
-            uint32_t int_ena = *(volatile uint32_t *)0x500E2064;
-            uint32_t conf = *(volatile uint32_t *)0x500E2000;
-            esp_rom_printf("\n[HEALTH] tgt=0x%08lx(%s) ST=0x%lx ENA=0x%lx CONF=0x%08lx\n",
+            uint32_t int_st       = *(volatile uint32_t *)0x500E2070;
+            uint32_t int_ena      = *(volatile uint32_t *)0x500E2064;
+            uint32_t conf         = *(volatile uint32_t *)0x500E2000;
+
+            /* Core 1 intmtx routing for systimer1 (memory-mapped, both cores see it) */
+            uint32_t intmtx_c1    = *(volatile uint32_t *)INTMTX_SYSTIMER1_CORE1;
+
+            /* --- BenVisor ISR-side state (uncached SRAM reads) ---
+             * These are written by benvisor_timer_isr every time it runs.
+             * If they stop changing, the ISR has stopped being invoked. */
+            uint32_t isr_count    = read_bv_nc(&benvisor_isr_count);
+            uint32_t last_mepc    = read_bv_nc(&benvisor_last_mepc);
+            uint32_t diag_mtvec   = read_bv_nc(&benvisor_diag_mtvec);
+            uint32_t diag_mstatus = read_bv_nc(&benvisor_diag_mstatus);
+            uint32_t hb_ctr       = read_bv_nc(&benvisor_heartbeat_ctr);
+            /* mcause restored by the ISR's csrw-before-mret (PATCH 9).
+             * On this CLIC, mret reloads mintstatus.mil from this word's
+             * MPIL field. If the last value at freeze carries a high MPIL
+             * while the working ones read ~0, the running level is stuck
+             * high and line 24 (level 7) can no longer preempt idle. */
+            uint32_t saved_mcause = read_bv_nc(&benvisor_saved_mcause);
+            uint32_t bail_count   = read_bv_nc(&benvisor_bail_count);
+            uint32_t bail_mepc    = read_bv_nc(&benvisor_bail_mepc);
+
+            /* --- Kernel trap-exit probe (PATCH 10) ---
+             * ipc->probe[] is written by the kernel just before each mret.
+             * The LAST value before a freeze is the return that crossed into
+             * the failing context. probe[0] MPP tells user(0) vs kernel(3). */
+            uint32_t pr_mstatus = ipc_nc->probe[0];
+            uint32_t pr_mcause  = ipc_nc->probe[1];
+            uint32_t pr_clic24  = ipc_nc->probe[2];
+            uint32_t pr_thresh  = ipc_nc->probe[3];
+
+            /* --- Kernel printk activity (IPC TX) --- */
+            uint32_t tx_head_now = ipc->tx_head;
+
+            /* --- Deltas vs previous poll --- */
+            uint32_t target_delta = alarm_target - last_alarm_target;
+            uint32_t isr_delta    = isr_count    - last_isr_count;
+            uint32_t tx_delta     = tx_head_now  - last_tx_head;
+            int32_t  hb_delta     = (int32_t)last_hb_ctr - (int32_t)hb_ctr;
+            uint32_t bail_delta   = bail_count - last_bail_count;
+
+            /* --- Freeze classification ---
+             * A "stuck poll" = (isr_delta == 0) AND alarm fired (INT_ST bit 1).
+             * If 3 stuck polls in a row, declare freeze.
+             * If isr_delta > 0 again later, we've recovered. */
+            bool stuck = (isr_delta == 0) && (int_st & 0x2);
+
+            if (stuck) {
+                stuck_polls++;
+            } else {
+                if (freeze_announced) {
+                    esp_rom_printf("\n[H] RECOVERED — ISR firing again after %lu stuck polls\n",
+                                   (unsigned long)stuck_polls);
+                    freeze_announced = false;
+                }
+                stuck_polls = 0;
+            }
+
+            if (!freeze_announced && stuck_polls >= 3) {
+                esp_rom_printf("\n");
+                esp_rom_printf("=========================================\n");
+                esp_rom_printf(" !! BenVisor ISR FREEZE DETECTED !!\n");
+                esp_rom_printf("=========================================\n");
+                esp_rom_printf(" Last successful ISR snapshot:\n");
+                esp_rom_printf("   isr_count    = %lu\n",       (unsigned long)isr_count);
+                esp_rom_printf("   last_mepc    = 0x%08lx   <-- KERNEL PC AT FREEZE (disasm here)\n",
+                               (unsigned long)last_mepc);
+                esp_rom_printf("   diag_mtvec   = 0x%08lx   <-- expected 0x484c78c3 (kernel mtvec)\n",
+                               (unsigned long)diag_mtvec);
+                esp_rom_printf("   diag_mstatus = 0x%08lx   <-- MIE bit3=%d, MPIE bit7=%d\n",
+                               (unsigned long)diag_mstatus,
+                               (diag_mstatus >> 3) & 1,
+                               (diag_mstatus >> 7) & 1);
+                esp_rom_printf("   saved_mcause = 0x%08lx   <-- mret restores mil from MPIL field\n",
+                               (unsigned long)saved_mcause);
+                esp_rom_printf("                  MPIL[31:24]=0x%02lx [23:16]=0x%02lx exc[11:0]=0x%03lx\n",
+                               (unsigned long)((saved_mcause >> 24) & 0xff),
+                               (unsigned long)((saved_mcause >> 16) & 0xff),
+                               (unsigned long)(saved_mcause & 0xfff));
+                esp_rom_printf("   bail_count   = %lu   <-- ticks taken while kernel sp==0\n",
+                               (unsigned long)bail_count);
+                esp_rom_printf("   bail_mepc    = 0x%08lx   <-- PC running with sp==0 (disasm/identify)\n",
+                               (unsigned long)bail_mepc);
+                esp_rom_printf(" Kernel trap-exit probe (last mret before freeze):\n");
+                esp_rom_printf("   probe.mstatus= 0x%08lx   <-- MPP[12:11]=%lu (0=USER return, 3=kernel)\n",
+                               (unsigned long)pr_mstatus,
+                               (unsigned long)((pr_mstatus >> 11) & 3));
+                esp_rom_printf("   probe.mcause = 0x%08lx   <-- MPIL[23:16]=0x%02lx (post-mret CLIC level)\n",
+                               (unsigned long)pr_mcause,
+                               (unsigned long)((pr_mcause >> 16) & 0xff));
+                esp_rom_printf("   probe.CLIC24 = 0x%08lx   <-- ip=%lu ie=%lu attr=0x%02lx ctl=0x%02lx\n",
+                               (unsigned long)pr_clic24,
+                               (unsigned long)(pr_clic24 & 1),
+                               (unsigned long)((pr_clic24 >> 8) & 1),
+                               (unsigned long)((pr_clic24 >> 16) & 0xff),
+                               (unsigned long)((pr_clic24 >> 24) & 0xff));
+                esp_rom_printf("   probe.thresh = 0x%08lx   <-- mintthresh (expect 0)\n",
+                               (unsigned long)pr_thresh);
+                esp_rom_printf(" Systimer at freeze:\n");
+                esp_rom_printf("   tgt          = 0x%08lx (frozen here)\n", (unsigned long)alarm_target);
+                esp_rom_printf("   INT_ST       = 0x%lx  (bit 1 latched: alarm fired)\n",
+                               (unsigned long)int_st);
+                esp_rom_printf("   INT_ENA      = 0x%lx  (alarm 1 still enabled if bit 1 set)\n",
+                               (unsigned long)int_ena);
+                esp_rom_printf("   CONF         = 0x%08lx (TARGET1_EN bit 23 = %d)\n",
+                               (unsigned long)conf, (int)((conf >> 23) & 1));
+                esp_rom_printf("   INTMTX_C1    = 0x%08lx (should = 24 in low 6 bits)\n",
+                               (unsigned long)intmtx_c1);
+                esp_rom_printf(" Kernel liveness:\n");
+                esp_rom_printf("   tx_head      = %lu (kernel printk position)\n",
+                               (unsigned long)tx_head_now);
+                esp_rom_printf("\n");
+                esp_rom_printf(" Will now poke /bin/sh with '\\r' every ~5 polls.\n");
+                esp_rom_printf(" If shell echoes anything (or tx_head advances),\n");
+                esp_rom_printf(" the kernel is alive and only the ISR is dead.\n");
+                esp_rom_printf(" If nothing comes back, kernel itself is frozen.\n");
+                esp_rom_printf("=========================================\n");
+                freeze_announced = true;
+                inject_cooldown  = 5;
+            }
+
+            /* --- Compact per-poll status line ---
+             * tgt:  systimer alarm 1 target (changes if ISR re-armed)
+             * d=:   target delta since last poll
+             * ST:   INT_ST bit 1 = alarm latched but not yet cleared
+             * isr=: BenVisor isr_count delta since last poll (0 = dead)
+             * tx=:  IPC TX head delta (kernel printk activity)
+             * hbd=: heartbeat counter delta (positive = decrementing = ISR alive)
+             */
+            esp_rom_printf("[H] tgt=0x%08lx(%s d=0x%lx) ST=0x%lx isr=%lu tx=%lu hbd=%ld bail=%lu(d%lu) MPP=%lu c24=0x%08lx mepc=0x%08lx\n",
                            (unsigned long)alarm_target,
-                           (alarm_target != last_alarm_target) ? "CHG" : "STA",
+                           (target_delta == 0) ? "STA" : "CHG",
+                           (unsigned long)target_delta,
                            (unsigned long)int_st,
-                           (unsigned long)int_ena,
-                           (unsigned long)conf);
+                           (unsigned long)isr_delta,
+                           (unsigned long)tx_delta,
+                           (long)hb_delta,
+                           (unsigned long)bail_count,
+                           (unsigned long)bail_delta,
+                           (unsigned long)((pr_mstatus >> 11) & 3),
+                           (unsigned long)pr_clic24,
+                           (unsigned long)last_mepc);
+
             last_alarm_target = alarm_target;
+            last_isr_count    = isr_count;
+            last_tx_head      = tx_head_now;
+            last_hb_ctr       = hb_ctr;
+            last_bail_count   = bail_count;
+
+            /* --- After freeze: poke the shell to test kernel liveness --- */
+            if (freeze_announced) {
+                if (inject_cooldown > 0) {
+                    inject_cooldown--;
+                } else {
+                    inject_cooldown = 5;  /* ~1s at 5Hz polling */
+                    uint32_t rx_head = ipc_nc->rx_head;
+                    uint32_t rx_next = (rx_head + 1) & IPC_RX_BUF_MASK;
+                    if (rx_next != ipc_nc->rx_tail) {
+                        ((volatile char *)ipc_nc->rx_buf)[rx_head] = '\r';
+                        ipc_nc->rx_head = rx_next;
+                        esp_rom_printf("[H] poke: \\r -> RX (rx_head=%lu); watch for echo / printk\n",
+                                       (unsigned long)rx_next);
+                    }
+                }
+            }
         }
 
         /* Tight polling — no vTaskDelay. Core 0 has nothing else to do.
@@ -642,6 +838,19 @@ void app_main(void)
     /* Compute uncached SRAM alias for cross-core coherency */
     benvisor_ipc_t *ipc_nc = (benvisor_ipc_t *)((uintptr_t)ipc + SOC_NON_CACHEABLE_OFFSET);
     ESP_LOGI(TAG, "IPC: %p (uncached: %p, %zu bytes)", ipc, ipc_nc, sizeof(benvisor_ipc_t));
+
+    /* PATCH 10 hardcodes the kernel-side probe write address as an absolute
+     * constant (0x8ff3c124 = uncached IPC base 0x8ff3b804 + 0x920). If the
+     * allocator ever moves IPC, that constant is wrong — flag it loudly and
+     * print the value to bake into the kernel patch. */
+    {
+        uint32_t probe_nc = (uint32_t)(uintptr_t)&ipc_nc->probe[0];
+        ESP_LOGI(TAG, "PROBE scratch (uncached) = 0x%08lx", (unsigned long)probe_nc);
+        if (probe_nc != 0x8ff3c124UL) {
+            ESP_LOGW(TAG, "PROBE addr != 0x8ff3c124 — update PATCH 10 'li t2,0x%08lx'",
+                     (unsigned long)probe_nc);
+        }
+    }
 
     /* Test uncached alias */
     {

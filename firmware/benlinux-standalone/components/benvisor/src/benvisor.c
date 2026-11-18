@@ -168,28 +168,41 @@ void benvisor_init(benvisor_ipc_t *ipc)
     esp_rom_printf("[BENVISOR] CLIC scrubbed: all 48 entries disabled\n");
 
     /* ---- Configure CLIC index 24 (systimer alarm 1 → BenVisor ISR) ----
-     *   SHV = 1   (vectored — dispatches through mtvt[24] = benvisor_timer_isr)
-     *   TRIG = 00 (level-triggered — IP follows INT_ST from systimer)
-     *   Priority = 7 (max)
-     *
-     * BenVisor ISR fires at 10kHz, polls mtimecmp, injects CLIC int 7
-     * when deadline passes. Kernel sees machine timer interrupt (cause 7). */
+     * SHV  = 1  : vectored → mtvt[24] = benvisor_timer_isr.
+     * TRIG = 01 : EDGE. This is BenVisor's own 10 kHz heartbeat, the engine
+     *             that polls TARGET1 and injects the kernel tick (line 7).
+     *             With LEVEL, clicintip[24] followed the systimer INT_ST level
+     *             — and at the first U-mode return the level failed to latch
+     *             into clicintip[24] (INT_ST=0x2 but ip=0), so the ISR never
+     *             re-entered and the whole heartbeat (and thus the kernel tick)
+     *             died at /bin/sh. That was the original freeze. EDGE makes the
+     *             CLIC latch clicintip[24] on the alarm's rising edge regardless
+     *             of privilege, and auto-clear it when the vectored ISR is taken
+     *             — the same fix that just made line 7 deliver cleanly.
+     * Priority = 7 (max). */
     mmio_write8(TIMER_CLIC_CTRL_REG + 1, 0x00);    /* IE: disable first */
     mmio_write8(TIMER_CLIC_CTRL_REG + 0, 0x00);    /* IP: clear */
-    mmio_write8(TIMER_CLIC_CTRL_REG + 2, 0x01);    /* ATTR: SHV=1, level-triggered */
+    mmio_write8(TIMER_CLIC_CTRL_REG + 2, 0x03);    /* ATTR: SHV=1, EDGE (trig=01) */
     mmio_write8(TIMER_CLIC_CTRL_REG + 3, 0xE0);    /* CTL: priority 7 (max) */
     mmio_write8(TIMER_CLIC_CTRL_REG + 1, 0x01);    /* IE: enable last */
 
-    /* ---- Configure CLIC index 7 (machine timer → kernel mtvec) ----
-     *   SHV = 0   (non-vectored — goes to mtvec.BASE = kernel handle_exception)
-     *   Priority = 6 (below systimer so BenVisor ISR preempts)
-     *   IE = 1
-     *
-     * BenVisor injects this by writing IP=1 when mtimecmp deadline passes.
-     * Kernel sees standard machine timer interrupt (mcause bit 31 + cause 7). */
+    /* ---- Configure CLIC index 7 (kernel timer tick → kernel via mtvt[7]) ----
+     * SHV  = 1  : VECTORED. On this P4 CLIC only the vectored path delivers
+     *             (SHV=0 lines latch IP but never reach mtvec — proven). The
+     *             hart vectors to mtvt[7] = kernel _start_trap (benvisor_asm.S)
+     *             → do_irq → the timer driver's handler (DT rebound to hwirq 7).
+     * TRIG = 01 : EDGE. BenVisor injects this tick by writing IP=1 once per
+     *             kernel deadline. The kernel's handler clears the SYSTIMER
+     *             INT_ST, NOT clicintip[7] (it can't — BenVisor is the artificial
+     *             source). With LEVEL, clicintip[7] stayed 1 → kernel re-took it
+     *             endlessly → livelock (isr collapsed to 271 at /bin/sh). EDGE
+     *             makes the CLIC auto-clear clicintip[7] when the vectored trap
+     *             is taken, so it fires exactly once per injection.
+     * Priority = 6 (below systimer line 24 so BenVisor's ISR is not preempted).
+     * IE = 1. */
     mmio_write8(0x2080101C + 1, 0x00);    /* IE: disable first */
     mmio_write8(0x2080101C + 0, 0x00);    /* IP: clear */
-    mmio_write8(0x2080101C + 2, 0x00);    /* ATTR: SHV=0, level-triggered */
+    mmio_write8(0x2080101C + 2, 0x03);    /* ATTR: SHV=1, EDGE (trig=01) */
     mmio_write8(0x2080101C + 3, 0xC0);    /* CTL: priority 6 (below systimer) */
     mmio_write8(0x2080101C + 1, 0x01);    /* IE: enable last */
 

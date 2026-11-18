@@ -163,6 +163,15 @@ typedef struct {
      * Points to esp_rom_output_tx_one_char. */
     volatile uint32_t rom_putc_addr;
 
+    /* PROBE scratch (offset 0x920). Written by the kernel's trap-exit
+     * probe (PATCH 10) on every return-to-context, read by Core 0:
+     *   [0] = mstatus being restored (MPP[12:11]: 0=user return, 3=kernel)
+     *   [1] = mcause  being restored (MPIL[23:16] = post-mret CLIC level)
+     *   [2] = live CLIC24 ctrl @0x20801060 ([ip][ie][attr][ctl])
+     *   [3] = live mintthresh  @0x20800008
+     * Absolute uncached address = IPC_base(0x8ff3b804) + 0x920 = 0x8ff3c124. */
+    volatile uint32_t probe[4];
+
 } benvisor_ipc_t;
 
 /* IPC struct field offsets (for assembly access) */
