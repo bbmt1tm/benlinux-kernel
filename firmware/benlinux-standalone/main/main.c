@@ -277,59 +277,60 @@ static esp_err_t load_kernel_and_dtb(const char *kernel_path,
                 ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
     ESP_LOGI(TAG, "Cache flush: %s", sync_err == ESP_OK ? "OK" : esp_err_to_name(sync_err));
 
-    /* ---- Create executable PSRAM mapping ----
-     * PSRAM data bus (0x48xxxxxx) does NOT support instruction fetch.
-     * We must create a separate exec mapping via esp_mmu_map().
-     * This maps the same physical PSRAM to a new virtual address (typically
-     * 0x4A000000) with instruction fetch capability.
+    /* ---- Make kernel executable at the SAME data address ----
      *
-     * The kernel entry and DTB address use the EXEC mapping.
-     * Data writes (kernel load, BSS clear) were done via data bus above. */
-    uint32_t psram_paddr = psram_base - 0x48000000;  /* physical offset within PSRAM */
-    void *exec_vaddr = NULL;
-    size_t exec_map_size = LINUX_RAM_SIZE;
-
-    ESP_LOGI(TAG, "PSRAM physical addr: 0x%08lx", (unsigned long)psram_paddr);
-
-    esp_err_t mmu_err = esp_mmu_map(psram_paddr, exec_map_size, MMU_TARGET_PSRAM0,
-                                     MMU_MEM_CAP_EXEC | MMU_MEM_CAP_READ | MMU_MEM_CAP_WRITE,
-                                     ESP_MMU_MMAP_FLAG_PADDR_SHARED, &exec_vaddr);
-    if (mmu_err != ESP_OK) {
-        ESP_LOGW(TAG, "EXEC+READ+WRITE failed: %s — trying EXEC+READ only",
-                 esp_err_to_name(mmu_err));
-        mmu_err = esp_mmu_map(psram_paddr, exec_map_size, MMU_TARGET_PSRAM0,
-                               MMU_MEM_CAP_EXEC | MMU_MEM_CAP_READ,
-                               ESP_MMU_MMAP_FLAG_PADDR_SHARED, &exec_vaddr);
-    }
-
-    if (mmu_err != ESP_OK || exec_vaddr == NULL) {
-        ESP_LOGE(TAG, "Failed to create exec mapping: %s", esp_err_to_name(mmu_err));
-        ESP_LOGE(TAG, "Kernel cannot execute from PSRAM without this mapping");
-        heap_caps_free(psram_raw);
-        return ESP_FAIL;
-    }
-
-    uint32_t exec_base = (uint32_t)exec_vaddr;
-    ESP_LOGI(TAG, "Executable mapping: paddr=0x%08lx -> vaddr=0x%08lx (%zu bytes)",
-             (unsigned long)psram_paddr, (unsigned long)exec_base, exec_map_size);
-
-    if (exec_base != psram_base) {
-        ESP_LOGW(TAG, "Exec vaddr (0x%08lx) differs from data vaddr (0x%08lx)",
-                 (unsigned long)exec_base, (unsigned long)psram_base);
-    }
-
+     * ESP32-P4 has UNIFIED I/D address space for PSRAM:
+     *   SOC_MMU_DI_VADDR_SHARED=y, SOC_IRAM_PSRAM == SOC_DRAM_PSRAM.
+     * MMU entries have NO R/W/X permission bits — any mapped page is
+     * RWX at the hardware level. The W^X rejection inside esp_mmu_map's
+     * s_mem_caps_check() is SOFTWARE POLICY only.
+     *
+     * What ACTUALLY blocks execute at 0x48xxxxxx is PMP — when
+     * CONFIG_ESP_SYSTEM_PMP_IDRAM_SPLIT=y, cpu_region_protect.c locks
+     * PMP entries 7-10 with RW (no X) for the PSRAM heap region, and
+     * those entries are L=1 so even M-mode is restricted.
+     *
+     * With CONFIG_ESP_SYSTEM_PMP_IDRAM_SPLIT=n in sdkconfig, those PMP
+     * entries are NOT configured. The PSRAM heap region falls into an
+     * unmatched PMP range → M-mode has full RWX. The heap's own MMU
+     * entries at 0x48200000 are already unified I/D, so all we need is
+     * fence.i to invalidate the icache so it picks up freshly-written
+     * kernel code.
+     *
+     * Result: kernel runs at 0x48200000 (its load address = link address
+     * via CONFIG_PAGE_OFFSET). No 0x4A alias, no exec mapping, no
+     * cross-cache coherency to worry about. */
     asm volatile("fence.i");
+
+    ESP_LOGI(TAG, "Kernel @ 0x%08lx: unified I/D mapping (no exec alias needed)",
+             (unsigned long)psram_base);
+
+    /* ---- Diagnostic: dump PMP entry 10 ----
+     * Sanity check — if PMP_IDRAM_SPLIT really is disabled, entry 10
+     * should be OFF (cfg=0) or at least not RW-locked over our region. */
+    {
+        uint32_t pmp10cfg_word, pmp10addr;
+        /* pmpcfg2 holds entries 8-11 (4 entries × 1 byte each).
+         * Read CSR 0x3A2 = pmpcfg2; entry 10's byte is bits [23:16]. */
+        asm volatile("csrr %0, 0x3A2" : "=r"(pmp10cfg_word));
+        asm volatile("csrr %0, 0x3BA" : "=r"(pmp10addr));   /* pmpaddr10 */
+        uint8_t pmp10cfg = (pmp10cfg_word >> 16) & 0xFF;
+        ESP_LOGI(TAG, "PMP[10]: cfg=0x%02x addr=0x%08lx %s",
+                 pmp10cfg, (unsigned long)(pmp10addr << 2),
+                 pmp10cfg == 0 ? "(OFF — PMP_IDRAM_SPLIT disabled, GOOD)"
+                              : "(STILL CONFIGURED — check sdkconfig)");
+    }
 
     /* ---- Place DTB in PSRAM ----
      * 15MB offset puts DTB safely past any possible kernel BSS.
      * DTB is only ~1KB. head.S clears BSS before parsing DTB — if DTB
      * overlaps BSS, it gets wiped → soc_early_init hangs.
      *
-     * Write DTB via DATA bus (0x48xxxxxx, writable).
-     * Kernel reads DTB via EXEC mapping address. */
+     * With unified I/D mapping, data and code use the SAME vaddr —
+     * one address for memcpy and for kernel access. */
     uint32_t dtb_offset = 15 * 1024 * 1024;
-    uint32_t dtb_data_addr = psram_base + dtb_offset;   /* data bus — for memcpy */
-    uint32_t dtb_addr = exec_base + dtb_offset;         /* exec mapping — for kernel */
+    uint32_t dtb_data_addr = psram_base + dtb_offset;
+    uint32_t dtb_addr = psram_base + dtb_offset;
 
     if (dtb_offset + ESP32P4_DTB_SIZE > LINUX_RAM_SIZE) {
         ESP_LOGE(TAG, "Kernel too large — no room for DTB");
@@ -365,8 +366,8 @@ static esp_err_t load_kernel_and_dtb(const char *kernel_path,
     esp_cache_msync((void *)dtb_data_addr, ESP32P4_DTB_SIZE,
                     ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
 
-    *out_entry = exec_base;          /* kernel entry via exec mapping */
-    *out_dtb = dtb_addr;              /* DTB via exec mapping */
+    *out_entry = psram_base;          /* kernel entry = data vaddr (unified I/D) */
+    *out_dtb = dtb_addr;
     return ESP_OK;
 }
 
