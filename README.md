@@ -12,7 +12,7 @@ Native Linux on Core 1 of the ESP32-P4, hosted by the BenVisor M-mode shim, with
 ## Firmware build notes
 
 - `sdkconfig` targets v1.x silicon (`CONFIG_ESP32P4_REV_MIN_1`). v3.x boards need ESP-IDF v5.5.3+ and a separate config.
-- Runtime needs a patched `components/esp_hw_support/port/esp32p4/cpu_region_protect.c` in the local IDF tree (PMA non-cacheable entries for Core 1: entry 0 CLIC at `0x20000000`, entry 12 HP peripherals at `0x50000000`). The patched file and `tools/apply_pma_patch.sh` referenced in the firmware README are not yet in this repo.
+- Runtime needs a patched `components/esp_hw_support/port/esp32p4/cpu_region_protect.c` in the IDF tree (PMA non-cacheable entries for Core 1: entry 0 CLIC at `0x20000000`, entry 12 HP peripherals at `0x50000000`). Run `firmware/benlinux-standalone/tools/apply_pma_patch.sh $IDF_PATH`; it only overwrites a stock v5.5.1 file. CI applies it automatically. The change itself is in `tools/esp-idf-patches/0001-esp32p4-core1-pma-noncacheable.patch`.
 - `CONFIG_ESP_SYSTEM_HW_STACK_GUARD=n` is required (the stack guard fires on `li sp, 0` in Linux `head.S`).
 
 ## Status (May 2026)

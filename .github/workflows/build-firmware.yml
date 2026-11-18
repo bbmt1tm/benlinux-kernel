@@ -1,8 +1,8 @@
 name: Build BenLinux Firmware
 
 # Builds the ESP-IDF host firmware (Core 0 relay + BenVisor) for ESP32-P4.
-# Compile check only: the runtime also needs the patched cpu_region_protect.c
-# (PMA non-cacheable entries for Core 1), which is applied to the local IDF tree.
+# The Core 1 PMA patch (tools/apply_pma_patch.sh) is applied to the container's
+# IDF tree before building, so the artefacts match a patched local build.
 
 on:
   push:
@@ -30,6 +30,7 @@ jobs:
         esp_idf_version: v5.5.1
         target: esp32p4
         path: firmware/benlinux-standalone
+        command: bash tools/apply_pma_patch.sh "$IDF_PATH" && idf.py build
 
     - name: Size report
       run: |
